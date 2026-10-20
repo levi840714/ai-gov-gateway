@@ -1,6 +1,6 @@
 # AGENTS.md
 
-AI Governance Gateway：統一治理 agent 的 LLM 流量與 tool 呼叫，提供 agent 身份、委託授權、policy 判斷、人工審批與稽核。
+AI Governance Gateway（`ai-gov-gateway`）：統一治理 agent 的 LLM 流量與 tool 呼叫，提供 agent 身份、委託授權、policy 判斷、人工審批與稽核。
 以 LiteLLM 作為 LLM 與 MCP 的 data plane，治理邏輯以 Python 實作。
 設計文件在 `docs/specs/`，實作計畫在 `docs/plans/`，技術驗證結果在 `docs/spikes/`。
 

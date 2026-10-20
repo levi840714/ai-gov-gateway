@@ -1,5 +1,5 @@
 [project]
-name = "ai-governance-gateway"
+name = "ai-gov-gateway"
 version = "0.1.0"
 description = "Governance gateway for agent LLM traffic and tool calls"
 requires-python = ">=3.12"

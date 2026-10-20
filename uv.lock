@@ -11,7 +11,7 @@ resolution-markers = [
 ]
 
 [[package]]
-name = "ai-governance-gateway"
+name = "ai-gov-gateway"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
