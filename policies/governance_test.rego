@@ -118,3 +118,103 @@ test_policy_version_present if {
 	is_string(data.meta.policy_version)
 	data.meta.policy_version != ""
 }
+
+# --- fail-closed：欄位缺漏、型別錯誤、資料錯誤 ---
+
+test_missing_user_denied if {
+	input_doc := object.remove(freeze(5000, clean), {"user"})
+	governance.decision.reasons == ["role_required"] with input as input_doc
+}
+
+test_roles_not_a_list_denied if {
+	input_doc := object.union(freeze(5000, clean), {"user": {"sub": "s", "username": "u", "roles": "analyst"}})
+	governance.decision.reasons == ["role_required"] with input as input_doc
+}
+
+test_missing_arguments_requires_approval if {
+	input_doc := object.remove(freeze(5000, clean), {"arguments"})
+	result := governance.decision with input as input_doc
+	result.reasons == ["amount_missing", "counterparty_missing"]
+}
+
+test_null_arguments_requires_approval if {
+	input_doc := object.union(freeze(5000, clean), {"arguments": null})
+	result := governance.decision with input as input_doc
+	result.reasons == ["amount_missing", "counterparty_missing"]
+}
+
+test_string_amount_requires_approval if {
+	governance.decision.reasons == ["amount_missing"] with input as freeze("25000", clean)
+}
+
+test_non_positive_amount_requires_approval if {
+	governance.decision.reasons == ["amount_invalid"] with input as freeze(-1, clean)
+	governance.decision.reasons == ["amount_invalid"] with input as freeze(0, clean)
+}
+
+test_threshold_boundary if {
+	governance.decision.decision == "allow" with input as freeze(9999.99, clean)
+	governance.decision.reasons == ["amount_over_threshold"] with input as freeze(10000, clean)
+}
+
+test_padded_sanctioned_address_still_matches if {
+	result := governance.decision with input as freeze(10, concat("", ["  ", sanctioned, "\n"]))
+	result.reasons == ["sanctioned_counterparty"]
+}
+
+test_malformed_counterparty_requires_approval if {
+	governance.decision.reasons == ["counterparty_invalid"] with input as freeze(10, "8589427373d6d84e98730d7795d8f6f8731fda16")
+	governance.decision.reasons == ["counterparty_invalid"] with input as freeze(10, "")
+}
+
+test_unknown_risk_value_denied if {
+	tools := object.union(data.tools, {"account_ops.close_account": {"risk": "critical"}})
+	result := governance.decision with input as call("close_account", {}) with data.tools as tools
+	result.reasons == ["risk_exceeds_agent_limit"]
+}
+
+test_agent_without_status_denied if {
+	agents := {"kyt-agent": object.remove(data.agents["kyt-agent"], {"status"})}
+	result := governance.decision with input as freeze(5000, clean) with data.agents as agents
+	result.reasons == ["agent_suspended"]
+}
+
+test_missing_threshold_requires_approval if {
+	# object.union 會遞迴合併，要先移除整個 entry 才能拿掉門檻
+	base := object.remove(data.tools, {"account_ops.freeze_account"})
+	tools := object.union(base, {"account_ops.freeze_account": {"risk": "high"}})
+	result := governance.decision with input as freeze(5000, clean) with data.tools as tools
+	result.reasons == ["threshold_invalid"]
+}
+
+test_empty_sanctions_list_requires_approval if {
+	result := governance.decision with input as freeze(10, clean) with data.sanctions as {"addresses": []}
+	result.reasons == ["sanctions_list_unavailable"]
+}
+
+test_deny_precedence if {
+	suspended := object.union(data.agents, {"kyt-agent": {"status": "suspended"}})
+	input_doc := object.union(freeze(5000, clean), {"user": bob})
+	result := governance.decision with input as input_doc with data.agents as suspended
+	result.reasons == ["agent_suspended"]
+}
+
+test_file_str_requires_analyst if {
+	input_doc := object.union(call("file_str", {"account_id": "a", "summary": "s"}), {"user": bob})
+	governance.decision.reasons == ["role_required"] with input as input_doc
+}
+
+test_data_integrity if {
+	every _, entry in data.tools {
+		entry.risk in object.keys(governance.risk_rank)
+	}
+	every _, entry in data.agents {
+		entry.status in {"active", "suspended"}
+		entry.max_risk in object.keys(governance.risk_rank)
+	}
+	count(data.sanctions.addresses) > 0
+	every address in data.sanctions.addresses {
+		regex.match(`^0x[0-9a-f]{40}$`, address)
+	}
+	is_number(data.tools["account_ops.freeze_account"].amount_threshold_usd)
+}

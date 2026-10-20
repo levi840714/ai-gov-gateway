@@ -1534,7 +1534,7 @@ docker run --rm -v "$PWD/policies:/policies:ro" openpolicyagent/opa:1.21.1 test 
 docker run --rm -v "$PWD/policies:/policies:ro" openpolicyagent/opa:1.21.1 fmt --list /policies
 docker run --rm -v "$PWD/policies:/policies:ro" openpolicyagent/opa:1.21.1 check --strict /policies
 ```
-Expected: `PASS: 17/17`；`fmt --list` 無輸出；`check` 無錯誤
+Expected: `PASS: 33/33`；`fmt --list` 無輸出；`check` 無錯誤
 
 - [ ] **Step 5: Commit**
 

@@ -324,7 +324,7 @@ M1 腳本的回歸：
 | 映像 | `uv pip install` 套件 | 複製 `src/ai_gov_gateway` 並設定 `PYTHONPATH` | 映像內沒有 pip 與 uv；執行期相依已在 LiteLLM 的 venv |
 | `mcp` 相依 | 未說明 | 只放在 `scripts` 依賴群組（`mcp<2`），不列入套件相依 | LiteLLM venv 內是 mcp 2.2.0 |
 | Policy 資料位置 | `policies/data/agents.json` 等 | `policies/agents/data.json`、`policies/tools/data.json`、`policies/sanctions/data.json`、`policies/meta/data.json` | OPA 以 `<dir>/data.json` 對應 `data.<dir>` |
-| 規則 | 規則 1–10 | 另加 `amount_missing`、`counterparty_missing`（凍結參數缺漏時送審）與 `high_risk_unreviewed_tool`（新增的高風險 tool 未寫規則時送審） | 參數缺漏時 Rego 的 `not` 會得到 undefined 而 fail-open；新 tool 預設送審 |
+| 規則 | 規則 1–10 | 守門條件改為正面 helper 加 not（欄位缺漏或資料錯誤時一律 deny 或送審）；另加送審原因 amount_missing、amount_invalid（≤ 0）、threshold_invalid、counterparty_missing、counterparty_invalid（非 0x 加 40 位十六進位）、sanctions_list_unavailable、high_risk_unreviewed_tool；制裁比對前先去空白並轉小寫；risk 值不在 risk_rank 時 deny risk_exceeds_agent_limit | Rego 中引用不存在的值是 undefined，not 與比較運算會 fail-open；審查時以缺欄位、型別錯誤與資料錯誤的輸入實測出放行路徑 |
 | 稽核欄位 | §7 | 新增 `comment` | 核准與駁回的意見需可追溯 |
 | 稽核驗證 | `agw audit verify` 直接讀資料庫 | 經 `GET /governance/audit/verify`（`compliance_supervisor`） | CLI 不需資料庫憑證 |
 | 寫入一致性 | 未說明 | 審批狀態變更與對應的稽核事件在同一個 transaction 寫入 | 避免「狀態變了但沒有稽核」 |
