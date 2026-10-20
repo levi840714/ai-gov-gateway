@@ -42,7 +42,7 @@ flowchart LR
 1. 驗證使用者 token（JWKS、issuer、audience、到期時間）
 2. 解析 `key_alias`，組成 OPA input（agent、user、tool、arguments），每次都先問 OPA
 3. OPA 回 `allow` / `deny` / `require_approval`
-4. `require_approval` 時，以 fingerprint（agent 版本、委託人、tool、參數）找已核准、未使用、未過期的審批：有就兌現一次並放行，沒有就建立或沿用 pending 審批，回傳 `approval_id`
+4. `require_approval` 時，以 fingerprint（agent 版本、委託人、tool、參數）找已核准、未使用、未過期的審批：本次 policy 的原因都已在核准範圍內就兌現一次並放行（出現新原因時作廢舊審批、重新送審），沒有就建立或沿用 pending 審批，回傳 `approval_id`
 5. 每個決策都寫入 hash chain 稽核
 
 被拒絕或待審批時，client 的 tool result 為 `isError=True`，內容是 JSON：

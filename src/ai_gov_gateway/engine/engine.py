@@ -51,6 +51,10 @@ def policy_input(agent: AgentRef, user: UserIdentity, call: ToolCall) -> dict[st
     }
 
 
+def _covers(approval: Approval, decision: PolicyDecision) -> bool:
+    return set(decision.reasons) <= set(approval.reasons)
+
+
 class GovernanceEngine:
     def __init__(
         self,
@@ -127,6 +131,10 @@ class GovernanceEngine:
             existing = await self._current_approval(fingerprint)
             if existing is None:
                 outcome = await self._create_pending(agent, user, call, decision, fingerprint)
+            elif existing.status is ApprovalStatus.APPROVED and not _covers(existing, decision):
+                # 核准時沒看過的新原因（如對手方後來被制裁）需要重新審批；先作廢才能建立新的
+                await self._expire(existing, from_statuses=(ApprovalStatus.APPROVED,))
+                continue
             elif existing.status is ApprovalStatus.APPROVED:
                 outcome = await self._redeem(agent, user, call, decision, existing)
             else:
@@ -196,14 +204,19 @@ class GovernanceEngine:
         now = self._clock()
         if approval is None or approval.expires_at > now:
             return approval
+        await self._expire(approval, from_statuses=OPEN_STATUSES)
+        return None
+
+    async def _expire(
+        self, approval: Approval, *, from_statuses: tuple[ApprovalStatus, ...]
+    ) -> None:
         await self._store.transition(
             approval.id,
-            from_statuses=OPEN_STATUSES,
+            from_statuses=from_statuses,
             to=ApprovalStatus.EXPIRED,
-            at=now,
+            at=self._clock(),
             audit=approval_event("approval_expired", approval, decision=ApprovalStatus.EXPIRED),
         )
-        return None
 
     async def _record(
         self,

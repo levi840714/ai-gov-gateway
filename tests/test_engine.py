@@ -151,6 +151,44 @@ async def test_approved_call_is_redeemed_once(engine, store, policy, clock):
     assert first_invalid(store.audit) is None
 
 
+async def test_new_policy_reason_needs_new_approval(engine, store, policy, clock):
+    policy.decision = NEEDS_APPROVAL
+    await engine.decide(freeze())
+    await store.transition(
+        "apr_1", from_statuses=(ApprovalStatus.PENDING,), to=ApprovalStatus.APPROVED, at=clock()
+    )
+    policy.decision = policy_result(
+        Decision.REQUIRE_APPROVAL, "amount_over_threshold", "sanctioned_counterparty"
+    )
+    outcome = await engine.decide(freeze())
+    assert (outcome.status, outcome.approval_id) == ("pending_approval", "apr_2")
+    assert store.approvals["apr_1"].status is ApprovalStatus.EXPIRED
+    assert store.approvals["apr_2"].reasons == ["amount_over_threshold", "sanctioned_counterparty"]
+    expired = [r for r in store.audit if r.event_type == "approval_expired"]
+    assert [(r.approval_id, r.reasons) for r in expired] == [("apr_1", ["amount_over_threshold"])]
+    assert "approval_redeemed" not in [r.event_type for r in store.audit]
+    assert first_invalid(store.audit) is None
+
+
+@pytest.mark.parametrize(
+    "reasons",
+    [("counterparty_missing", "amount_over_threshold"), ("amount_over_threshold",)],
+    ids=["same_reasons", "subset"],
+)
+async def test_approval_covering_current_reasons_is_redeemed(engine, store, policy, clock, reasons):
+    policy.decision = policy_result(
+        Decision.REQUIRE_APPROVAL, "amount_over_threshold", "counterparty_missing"
+    )
+    await engine.decide(freeze())
+    await store.transition(
+        "apr_1", from_statuses=(ApprovalStatus.PENDING,), to=ApprovalStatus.APPROVED, at=clock()
+    )
+    policy.decision = policy_result(Decision.REQUIRE_APPROVAL, *reasons)
+    outcome = await engine.decide(freeze())
+    assert outcome.status == "allowed"
+    assert store.approvals["apr_1"].status is ApprovalStatus.USED
+
+
 async def test_changed_arguments_need_new_approval(engine, store, policy, clock):
     policy.decision = NEEDS_APPROVAL
     await engine.decide(freeze(25000))
