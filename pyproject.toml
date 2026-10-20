@@ -1,19 +1,36 @@
 [project]
 name = "ai-gov-gateway"
-version = "0.1.0"
+version = "0.2.0"
 description = "Governance gateway for agent LLM traffic and tool calls"
 requires-python = ">=3.12"
+# gateway 映像以 PYTHONPATH 載入原始碼：除 typer（只給主機上的 CLI）外，須已存在於 LiteLLM 的 venv
 dependencies = [
+    "fastapi>=0.115",
     "httpx>=0.28",
-    "mcp>=1.30,<2",
-    "python-dotenv>=1.1",
+    "psycopg[binary]>=3.2",
+    "pydantic>=2.10",
+    "pydantic-settings>=2.6",
+    "pyjwt[crypto]>=2.10",
+    "typer>=0.15",
 ]
 
+[project.scripts]
+agw = "ai_gov_gateway.cli:app"
+
 [dependency-groups]
-dev = ["mypy>=1.18", "pytest>=8.4", "ruff>=0.13"]
+dev = ["mypy>=1.18", "pytest>=8.4", "pytest-asyncio>=0.24", "ruff>=0.13"]
+# M1 驗證腳本、示範腳本與 account_ops 用；gateway 映像內是 mcp 2.x，不可列入套件相依
+scripts = ["mcp>=1.30,<2", "python-dotenv>=1.1"]
 
 [tool.uv]
-package = false
+default-groups = ["dev", "scripts"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ai_gov_gateway"]
 
 [tool.ruff]
 line-length = 100
@@ -23,7 +40,17 @@ extend-exclude = ["docs"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
 
+[tool.mypy]
+python_version = "3.12"
+disallow_untyped_defs = true
+warn_unused_ignores = true
+
+[[tool.mypy.overrides]]
+module = ["litellm", "litellm.*"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 pythonpath = ["."]
+asyncio_mode = "auto"
 markers = ["integration: requires docker compose services"]
 addopts = "-m 'not integration'"
