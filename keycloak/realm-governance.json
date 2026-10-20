@@ -48,6 +48,25 @@
       "realmRoles": [
         "compliance_supervisor"
       ]
+    },
+    {
+      "username": "carol",
+      "enabled": true,
+      "email": "carol@example.test",
+      "emailVerified": true,
+      "firstName": "Carol",
+      "lastName": "Lead",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "carol-test-pw",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "analyst",
+        "compliance_supervisor"
+      ]
     }
   ],
   "clients": [
@@ -92,6 +111,16 @@
             "access.token.claim": "true",
             "id.token.claim": "false"
           }
+        },
+        {
+          "name": "aud-account-ops",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.client.audience": "account-ops",
+            "access.token.claim": "true",
+            "id.token.claim": "false"
+          }
         }
       ]
     },
@@ -122,6 +151,34 @@
       "clientId": "probe-mcp",
       "publicClient": false,
       "secret": "probe-mcp-test-secret",
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false
+    },
+    {
+      "clientId": "agw-cli",
+      "publicClient": true,
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "attributes": {
+        "oauth2.device.authorization.grant.enabled": "true"
+      },
+      "protocolMappers": [
+        {
+          "name": "aud-ai-gateway",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.client.audience": "ai-gateway",
+            "access.token.claim": "true",
+            "id.token.claim": "false"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "account-ops",
+      "publicClient": false,
+      "secret": "account-ops-test-secret",
       "standardFlowEnabled": false,
       "directAccessGrantsEnabled": false
     }

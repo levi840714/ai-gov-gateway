@@ -21,7 +21,7 @@ services:
     environment:
       PROBE_WHOAMI_DESCRIPTION: ${PROBE_WHOAMI_DESCRIPTION:-Return the headers and bearer token claims this server received.}
     ports:
-      - "8100:8100"
+      - "127.0.0.1:8100:8100"
 
   postgres:
     image: postgres:17.6
@@ -29,6 +29,8 @@ services:
       POSTGRES_USER: litellm
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: litellm
+    ports:
+      - "127.0.0.1:55433:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -36,9 +38,25 @@ services:
       interval: 5s
       retries: 10
 
-  litellm:
-    # GHCR 下載在本機網路逾時，改用官方 Docker Hub 映像（同版本）
-    image: docker.io/litellm/litellm:v1.105.1
+  account_ops:
+    build:
+      context: .
+      dockerfile: account_ops/Dockerfile
+    # 本身不驗證呼叫者，只放在 gateway 才能進入的內部網路
+    networks: [governed]
+
+  opa:
+    image: docker.io/openpolicyagent/opa:1.21.1
+    # 不對外開 port：只有 gateway 能透過內部網路查詢
+    networks: [governed]
+    command: ["run", "--server", "--addr", "0.0.0.0:8181", "--watch", "--log-level", "error", "/policies"]
+    volumes:
+      - ./policies:/policies:ro
+
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
     command: ["--config", "/app/config.yaml", "--port", "4000"]
     environment:
       DATABASE_URL: postgresql://litellm:${POSTGRES_PASSWORD}@postgres:5432/litellm
@@ -46,14 +64,24 @@ services:
       GOOGLE_API_KEY: ${GOOGLE_API_KEY}
       AI_GATEWAY_CLIENT_SECRET: ${AI_GATEWAY_CLIENT_SECRET}
       STORE_MODEL_IN_DB: "True"
+      GOV_DATABASE_URL: postgresql://litellm:${POSTGRES_PASSWORD}@postgres:5432/governance
+      GOV_OPA_URL: http://opa:8181
     volumes:
       - ./litellm/config.yaml:/app/config.yaml:ro
-      - ./litellm/governance_hook.py:/app/governance_hook.py:ro
     ports:
       - "4000:4000"
+    networks: [default, governed]
     depends_on:
       postgres:
         condition: service_healthy
+      opa:
+        condition: service_started
+      keycloak:
+        condition: service_started
+
+networks:
+  governed:
+    internal: true
 
 volumes:
   pgdata:

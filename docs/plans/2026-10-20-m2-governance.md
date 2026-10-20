@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **實作後註記（2026-10-20）**：本計畫的程式碼區塊是實作的起點。各 task 經規格、程式品質與安全審查後有多處修改（policy 的 fail-closed 改寫、`ApprovalConflict` 與部分唯一索引、`json` 欄位、先驗證使用者再檢查 agent key、API 與 CLI 的錯誤處理、Postgres port 改為 `127.0.0.1:55433` 等），完成後以 repo 內的程式碼為準，差異整理在 spec §11。
+
 **Goal:** 在 ai-gov-gateway 上實作 tool 呼叫的治理：agent 註冊與版本 key、OPA policy、maker-checker 審批、hash chain 稽核，並以腳本跑完 spec §9 的 13 個端到端情境。
 
 **Architecture:** 治理邏輯是 `src/ai_gov_gateway/` 套件。LiteLLM 依 config 的 guardrail 設定載入 `ai_gov_gateway.plugin`，該模組在載入時把 `/governance` 路由掛到 LiteLLM 的 app，並提供 `pre_mcp_call` hook，所以 LiteLLM 與治理邏輯在同一個 process、同一個 port。引擎（`engine/`）不 import LiteLLM，依賴 `PolicyClient`（OPA）與 `GovernanceStore`（Postgres）兩個 Protocol，單元測試用 fake。
@@ -1534,7 +1536,7 @@ docker run --rm -v "$PWD/policies:/policies:ro" openpolicyagent/opa:1.21.1 test 
 docker run --rm -v "$PWD/policies:/policies:ro" openpolicyagent/opa:1.21.1 fmt --list /policies
 docker run --rm -v "$PWD/policies:/policies:ro" openpolicyagent/opa:1.21.1 check --strict /policies
 ```
-Expected: `PASS: 17/17`；`fmt --list` 無輸出；`check` 無錯誤
+Expected: `PASS: 33/33`；`fmt --list` 無輸出；`check` 無錯誤
 
 - [ ] **Step 5: Commit**
 
@@ -4190,7 +4192,7 @@ async def test_obo_still_reaches_upstream():
 - [ ] **Step 2: 執行並 Commit**
 
 Run: `uv run pytest -m integration -q`
-Expected: 7 passed（Postgres store 4 + 契約 3）
+Expected: 14 passed（Postgres store 10 + 契約 4）
 
 ```bash
 git add tests/integration/test_gateway_contract.py

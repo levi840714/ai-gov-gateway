@@ -70,8 +70,9 @@ flowchart LR
 
 | 元件 | 職責 | 位置 |
 | ---- | ---- | ---- |
-| gateway 進入點 | import LiteLLM 的 `app`，`include_router(governance_router)` | `src/ai_gov_gateway/app.py` |
-| governance hook | 從 LiteLLM `data` 取出 agent、使用者 token、tool、參數，呼叫引擎；放行時回傳 `data`，否則 raise JSON 訊息 | `src/ai_gov_gateway/hook.py` |
+| LiteLLM plugin | `GovernanceGuardrail`（`pre_mcp_call`）呼叫引擎，放行時回傳 `data`，否則 raise JSON 訊息；LiteLLM 載入此模組時把 `/governance` router 與 Authorization header 檢查掛到 LiteLLM 的 `app` | `src/ai_gov_gateway/plugin.py` |
+| hook adapter | 從 LiteLLM hook 的 `data` 取出 tool、參數與使用者 token，組成 `ToolCall`；判斷 Authorization header 是否不明確 | `src/ai_gov_gateway/hook_adapter.py` |
+| runtime | 由 `Settings` 組出引擎、token 驗證與審批服務（lazy 單例） | `src/ai_gov_gateway/runtime.py` |
 | 治理引擎 | token 驗證、組成 OPA input、處理審批比對、寫入稽核 | `src/ai_gov_gateway/engine/` |
 | 審批 API | 列表、詳情、核准、駁回；maker-checker | `src/ai_gov_gateway/api/` |
 | 審批 CLI | `agw login`、`agw approvals …`、`agw audit verify` | `src/ai_gov_gateway/cli.py` |
@@ -79,7 +80,7 @@ flowchart LR
 | Policy 與資料 | 規則、agent 註冊表、tool 註冊表、制裁名單、版本 | `policies/` |
 | account_ops | 三個 tool 與記憶體內的帳戶狀態 | `account_ops/` |
 
-依賴方向：`app` → `hook` / `api` → `engine` → `config`。`engine` 不 import LiteLLM，可以不啟動 LiteLLM 單獨測試。引擎依賴兩個 Protocol：`PolicyClient`（OPA）與 `GovernanceStore`（Postgres）。
+依賴方向：`plugin` / `api` → `runtime` → `engine` / `config`。`engine` 不 import LiteLLM 與 `config`，可以不啟動 LiteLLM 單獨測試。引擎依賴兩個 Protocol：`PolicyClient`（OPA）與 `GovernanceStore`（Postgres）。
 
 M1 的 `probe_mcp` 保留於 compose，登記為 low 風險 tool，作為升級 LiteLLM 時的回歸測試；`scripts/` 的 M1 驗證腳本保留作為紀錄。
 
@@ -87,13 +88,11 @@ M1 的 `probe_mcp` 保留於 compose，登記為 low 風險 tool，作為升級 
 
 ```dockerfile
 FROM docker.io/litellm/litellm:v1.105.1
-COPY . /opt/ai-gov-gateway
-RUN uv pip install --python /app/.venv/bin/python /opt/ai-gov-gateway
-ENV CONFIG_FILE_PATH=/app/config.yaml
-CMD ["/app/.venv/bin/python", "-m", "uvicorn", "ai_gov_gateway.app:app", "--host", "0.0.0.0", "--port", "4000"]
+COPY src/ai_gov_gateway /opt/ai-gov-gateway/ai_gov_gateway
+ENV PYTHONPATH=/opt/ai-gov-gateway
 ```
 
-套件裝進 LiteLLM 的 venv（Python 3.13），相依套件需與 LiteLLM 的版本相容（見 §9 風險）。`litellm/config.yaml` 的 guardrail 改為 `guardrail: ai_gov_gateway.hook.GovernanceHook`。
+映像內沒有 pip 與 uv，原始碼以 `PYTHONPATH` 載入，執行期相依直接使用 LiteLLM 的 venv（Python 3.13），版本需相容（見 §10 風險）。啟動方式維持 `litellm --config`（compose 的 `command`）；`litellm/config.yaml` 的 guardrail 為 `guardrail: ai_gov_gateway.plugin.GovernanceGuardrail`。
 
 ## 4. 決策流程
 
@@ -313,3 +312,31 @@ M1 腳本的回歸：
 | hook 的 raise 訊息格式在不同 client 呈現不同 | 以 MCP Python SDK client 驗證；訊息為純 JSON 字串，不依賴例外型別 |
 | device flow 無法在自動化測試中執行 | 自動化測試沿用 password grant 測試帳號，device flow 以手動驗證 |
 | 多 worker 同時寫入稽核 | advisory lock 序列化；整合測試以並行請求驗證 chain 完整 |
+
+## 11. 撰寫計畫與實作審查時的修正（2026-10-20）
+
+計畫前實測與實作審查後，以下細節與上文不同，以本節為準；「並發建立審批」以下各列為實作時經審查新增：
+
+| 項目 | 上文 | 修正 | 理由 |
+| ---- | ---- | ---- | ---- |
+| 啟動方式 | 自訂 uvicorn 進入點 `app.py` | 保留 `litellm --config` 啟動；LiteLLM 依 guardrail 設定載入 `ai_gov_gateway.plugin` 時，該模組把 `/governance` router 掛到 app | LiteLLM CLI 在啟動前會做 Prisma migration 與環境設定，自訂進入點會略過 |
+| 映像 | `uv pip install` 套件 | 複製 `src/ai_gov_gateway` 並設定 `PYTHONPATH` | 映像內沒有 pip 與 uv；執行期相依已在 LiteLLM 的 venv |
+| `mcp` 相依 | 未說明 | 只放在 `scripts` 依賴群組（`mcp<2`），不列入套件相依 | LiteLLM venv 內是 mcp 2.2.0 |
+| Policy 資料位置 | `policies/data/agents.json` 等 | `policies/agents/data.json`、`policies/tools/data.json`、`policies/sanctions/data.json`、`policies/meta/data.json` | OPA 以 `<dir>/data.json` 對應 `data.<dir>` |
+| 規則 | 規則 1–10 | 守門條件改為正面 helper 加 not（欄位缺漏或資料錯誤時一律 deny 或送審）；另加送審原因 amount_missing、amount_invalid（≤ 0）、threshold_invalid、counterparty_missing、counterparty_invalid（非 0x 加 40 位十六進位）、sanctions_list_unavailable、high_risk_unreviewed_tool；制裁比對前先去空白並轉小寫；risk 值不在 risk_rank 時 deny risk_exceeds_agent_limit | Rego 中引用不存在的值是 undefined，not 與比較運算會 fail-open；審查時以缺欄位、型別錯誤與資料錯誤的輸入實測出放行路徑 |
+| 稽核欄位 | §7 | 新增 `comment` | 核准與駁回的意見需可追溯 |
+| 稽核驗證 | `agw audit verify` 直接讀資料庫 | 經 `GET /governance/audit/verify`（`compliance_supervisor`） | CLI 不需資料庫憑證 |
+| 寫入一致性 | 未說明 | 審批狀態變更與對應的稽核事件在同一個 transaction 寫入 | 避免「狀態變了但沒有稽核」 |
+| account_ops 的 tool 鎖定 | 未說明 | M2 不設定 | 不在 M2 驗收情境中 |
+| Postgres port | 未對外 | 開 `127.0.0.1:55433` | 主機上的整合測試需要連線；5433 在開發機上已被其他程式佔用 |
+| 情境 4 | alice 自己核准 | 新增測試帳號 carol（analyst + compliance_supervisor），由 carol 委託後自己核准 | alice 沒有主管角色，只會得到 `role_required`，測不到 maker-checker |
+| 並發建立審批 | 相同 fingerprint 已有 pending 時沿用 | store 契約保證每個 fingerprint 最多一筆 pending 或 approved（Postgres 部分唯一索引 `approvals_one_open`）；違反時 raise `ApprovalConflict` 並整筆 rollback，引擎重新查詢後沿用或兌現，最多 3 次，仍衝突時 deny `approval_conflict` | 審查時發現並發請求會各自建立 pending 審批，同一組參數出現多筆可核准的審批 |
+| JSON 欄位型別 | `arguments` 為 jsonb | `arguments`、`reasons` 改為 `json` | jsonb 會改寫數字（`1e22` 讀回成整數、`-0.0` 讀回成 `0.0`），讀回後重算的 hash 對不上，整條 chain 驗證失敗 |
+| 驗證順序 | 先解析 `key_alias` | 先驗證使用者 token，再判斷 agent key 是否符合 `<agent>@<版本>` | 未註冊版本的拒絕也要記錄是代表哪位使用者，稽核才能追到委託人 |
+| 核准角色 | 只檢查全域的 `compliance_supervisor` | 另外要求核准者具有該筆審批儲存的 `approver_role`；`list(expired)` 會一併取回已逾期但尚未落帳的審批 | policy 可依情況指定不同的核准角色；逾期在讀取時才落帳，只查 expired 會漏掉 |
+| API 錯誤代碼 | 未說明 | 沒有 token 時先回 `401 missing_token`，不觸及資料庫；資料庫連不上回 `503 governance_store_unavailable`，其他資料庫錯誤回 `500 governance_store_error`；hook 遇到資料庫中斷時拒絕原因為 `governance_store_unavailable`；`comment` 最多 2000 字 | 未登入的請求不應能探測後端狀態；呼叫端要能區分暫時性與永久性錯誤 |
+| CLI 錯誤處理 | 未說明 | 網路錯誤與格式不正確的回應以結束碼 1 結束，只印例外類別名稱；device flow 以伺服器給的 `expires_in` 為期限；token 檔案 0600、目錄 0700；`--status` 限定為審批狀態列舉 | 例外訊息可能含 URL 或標頭；避免無限輪詢與其他使用者讀取 token |
+| 內部網路 | OPA 只以不開 port 隔離 | `opa`、`account_ops` 只加入 `governed` 網路（`internal: true`），gateway 同時加入 default 與 `governed` | 兩者不驗證呼叫者；審查時從 `probe_mcp` 容器可直接對 account_ops 呼叫 `tools/list` |
+| 身分 header | 未說明 | gateway 的所有 HTTP 路由上（LLM 端點也會以 litellm_proxy 執行 MCP tool），名稱以 `authorization` 開頭的 header 不是恰好一個 `Authorization` 時（如多一個 `Authorization-Obo`、重複的 `Authorization`）一律回 `400 ambiguous_authorization_headers` | LiteLLM v1.105.1 以任一 `Authorization*` header 做 OBO，hook 只驗 `Authorization`；審查時以 `Authorization-Obo` 讓稽核記錄 alice、上游收到 bob |
+| 兌現條件 | 相同 fingerprint 且已核准、未使用、未過期 | 另外要求本次 policy 的 reasons 都在審批的 reasons 內；有新原因時把舊審批由 approved 改為 expired（稽核 `approval_expired`，reasons 為舊審批的），再建立帶新 reasons 的 pending 審批 | 審查時發現以 `amount_over_threshold` 核准後，對手方被制裁（多出 `sanctioned_counterparty`）仍可兌現 |
+| 使用者 token 的 client | 只驗 issuer、audience、到期時間 | 另外要求 `azp` 在 `GOV_OIDC_ALLOWED_CLIENTS`（JSON 陣列，預設 `["kyt-cli", "agw-cli"]`）內，缺少或不符時為 `ClientNotAllowed`，hook 回 `invalid_user_token` | 服務帳號（如 kyt-agent）的 client_credentials token 也帶 `aud: ai-gateway`，審查時被當成委託的使用者接受 |
