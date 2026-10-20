@@ -147,6 +147,32 @@ def test_html_success_body_is_rejected(gateway):
     assert "Traceback" not in result.output
 
 
+@pytest.mark.parametrize(
+    ("method", "path", "args", "body"),
+    [
+        ("GET", "/governance/approvals", ["approvals", "list"], {"id": "apr_1"}),
+        ("GET", "/governance/approvals", ["approvals", "list"], [{"id": "apr_1"}]),
+        ("GET", "/governance/approvals", ["approvals", "list"], ["apr_1"]),
+        (
+            "POST",
+            "/governance/approvals/apr_1/approve",
+            ["approvals", "approve", "apr_1"],
+            [APPROVAL],
+        ),
+        ("GET", "/governance/audit/verify", ["audit", "verify"], {"records": 3}),
+        ("GET", "/governance/audit/verify", ["audit", "verify"], [1, 2]),
+    ],
+    ids=["object", "missing_keys", "not_objects", "approve_list", "verify_missing", "verify_list"],
+)
+def test_unexpected_json_shape_is_rejected(gateway, method, path, args, body):
+    _, responses = gateway
+    responses[(method, path)] = httpx.Response(200, json=body)
+    result = runner.invoke(cli.app, args)
+    assert result.exit_code == 1
+    assert "閘道回應格式不正確" in result.output
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+
+
 def test_login_saves_token_without_echoing_it(monkeypatch, tmp_path):
     token_path = tmp_path / "token.json"
     monkeypatch.setenv("AGW_TOKEN_PATH", str(token_path))

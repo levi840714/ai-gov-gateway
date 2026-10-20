@@ -70,8 +70,9 @@ flowchart LR
 
 | 元件 | 職責 | 位置 |
 | ---- | ---- | ---- |
-| gateway 進入點 | import LiteLLM 的 `app`，`include_router(governance_router)` | `src/ai_gov_gateway/app.py` |
-| governance hook | 從 LiteLLM `data` 取出 agent、使用者 token、tool、參數，呼叫引擎；放行時回傳 `data`，否則 raise JSON 訊息 | `src/ai_gov_gateway/hook.py` |
+| LiteLLM plugin | `GovernanceGuardrail`（`pre_mcp_call`）呼叫引擎，放行時回傳 `data`，否則 raise JSON 訊息；LiteLLM 載入此模組時把 `/governance` router 與 Authorization header 檢查掛到 LiteLLM 的 `app` | `src/ai_gov_gateway/plugin.py` |
+| hook adapter | 從 LiteLLM hook 的 `data` 取出 tool、參數與使用者 token，組成 `ToolCall`；判斷 Authorization header 是否不明確 | `src/ai_gov_gateway/hook_adapter.py` |
+| runtime | 由 `Settings` 組出引擎、token 驗證與審批服務（lazy 單例） | `src/ai_gov_gateway/runtime.py` |
 | 治理引擎 | token 驗證、組成 OPA input、處理審批比對、寫入稽核 | `src/ai_gov_gateway/engine/` |
 | 審批 API | 列表、詳情、核准、駁回；maker-checker | `src/ai_gov_gateway/api/` |
 | 審批 CLI | `agw login`、`agw approvals …`、`agw audit verify` | `src/ai_gov_gateway/cli.py` |
@@ -79,7 +80,7 @@ flowchart LR
 | Policy 與資料 | 規則、agent 註冊表、tool 註冊表、制裁名單、版本 | `policies/` |
 | account_ops | 三個 tool 與記憶體內的帳戶狀態 | `account_ops/` |
 
-依賴方向：`app` → `hook` / `api` → `engine` → `config`。`engine` 不 import LiteLLM，可以不啟動 LiteLLM 單獨測試。引擎依賴兩個 Protocol：`PolicyClient`（OPA）與 `GovernanceStore`（Postgres）。
+依賴方向：`plugin` / `api` → `runtime` → `engine` / `config`。`engine` 不 import LiteLLM 與 `config`，可以不啟動 LiteLLM 單獨測試。引擎依賴兩個 Protocol：`PolicyClient`（OPA）與 `GovernanceStore`（Postgres）。
 
 M1 的 `probe_mcp` 保留於 compose，登記為 low 風險 tool，作為升級 LiteLLM 時的回歸測試；`scripts/` 的 M1 驗證腳本保留作為紀錄。
 
@@ -87,13 +88,11 @@ M1 的 `probe_mcp` 保留於 compose，登記為 low 風險 tool，作為升級 
 
 ```dockerfile
 FROM docker.io/litellm/litellm:v1.105.1
-COPY . /opt/ai-gov-gateway
-RUN uv pip install --python /app/.venv/bin/python /opt/ai-gov-gateway
-ENV CONFIG_FILE_PATH=/app/config.yaml
-CMD ["/app/.venv/bin/python", "-m", "uvicorn", "ai_gov_gateway.app:app", "--host", "0.0.0.0", "--port", "4000"]
+COPY src/ai_gov_gateway /opt/ai-gov-gateway/ai_gov_gateway
+ENV PYTHONPATH=/opt/ai-gov-gateway
 ```
 
-套件裝進 LiteLLM 的 venv（Python 3.13），相依套件需與 LiteLLM 的版本相容（見 §9 風險）。`litellm/config.yaml` 的 guardrail 改為 `guardrail: ai_gov_gateway.hook.GovernanceHook`。
+映像內沒有 pip 與 uv，原始碼以 `PYTHONPATH` 載入，執行期相依直接使用 LiteLLM 的 venv（Python 3.13），版本需相容（見 §10 風險）。啟動方式維持 `litellm --config`（compose 的 `command`）；`litellm/config.yaml` 的 guardrail 為 `guardrail: ai_gov_gateway.plugin.GovernanceGuardrail`。
 
 ## 4. 決策流程
 

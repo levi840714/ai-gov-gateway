@@ -71,6 +71,22 @@ M1 的主要結論：
 | `account_ops` | 不對外（`governed` 內部網路） | 模擬下游 MCP server：`add_to_watchlist`、`freeze_account`、`file_str` |
 | `probe_mcp` | `127.0.0.1:8100` | 測試用上游 MCP server，回傳收到的 header 與 token claims |
 
+## 設定
+
+gateway 內的治理元件從容器環境變數讀取 `GOV_` 開頭的設定（不讀 `.env`，值在 `docker-compose.yml` 設定）：
+
+| 環境變數 | 預設值 | 用途 |
+| -------- | ------ | ---- |
+| `GOV_DATABASE_URL` | （空，必填） | 治理資料庫（審批與稽核） |
+| `GOV_OPA_URL` | `http://opa:8181` | OPA REST API |
+| `GOV_OPA_TIMEOUT_SECONDS` | `2.0` | OPA 查詢逾時，逾時視為 `policy_unavailable` |
+| `GOV_OIDC_ISSUER` | `http://localhost:8080/realms/governance` | 使用者 token 的 `iss` |
+| `GOV_OIDC_JWKS_URL` | `http://keycloak:8080/realms/governance/protocol/openid-connect/certs` | 驗章用的 JWKS |
+| `GOV_OIDC_AUDIENCE` | `ai-gateway` | 使用者 token 必須包含的 `aud` |
+| `GOV_OIDC_ALLOWED_CLIENTS` | `["kyt-cli", "agw-cli"]` | 允許的 `azp`，以 JSON 陣列設定，例如 `GOV_OIDC_ALLOWED_CLIENTS='["kyt-cli"]'`；不可為空 |
+| `GOV_APPROVAL_TTL_HOURS` | `24` | 審批有效期（小時） |
+| `GOV_APPROVER_ROLE` | `compliance_supervisor` | 審批 API 要求的角色；policy 未指定時也是審批的核准角色 |
+
 ## 啟動
 
 ```bash
@@ -99,7 +115,7 @@ uv run agw audit verify                            # 重算 hash chain；不一�
 - 需要 `compliance_supervisor` 角色；核准者不得是委託人本人（`403 self_approval_forbidden`）
 - token 存於 `~/.config/ai-gov-gateway/token.json`（檔案 0600、目錄 0700），只存 access token，過期需重新登入
 - 設定以 `AGW_` 開頭的環境變數覆寫：`AGW_GATEWAY_URL`、`AGW_OIDC_ISSUER`、`AGW_CLIENT_ID`、`AGW_TOKEN_PATH`
-- 網路錯誤或回應格式不正確時只印例外類別名稱並以結束碼 1 結束，不輸出 token
+- 網路錯誤時只印例外類別名稱、回應不是 JSON 或欄位不符時印 `閘道回應格式不正確`，皆以結束碼 1 結束，不輸出 token
 
 ### 審批 API
 
@@ -111,7 +127,21 @@ uv run agw audit verify                            # 重算 hash chain；不一�
 | `POST /governance/approvals/{id}/reject` | 駁回 |
 | `GET /governance/audit/verify` | 驗證稽核 hash chain |
 
-以 Keycloak access token（`Authorization: Bearer`）驗證，不使用 LiteLLM virtual key。沒有 token 回 `401 missing_token`；資料庫連不上回 `503 governance_store_unavailable`，其他資料庫錯誤回 `500 governance_store_error`。
+以 Keycloak access token（`Authorization: Bearer`）驗證，不使用 LiteLLM virtual key。錯誤回應的 `detail`：
+
+| 狀態碼 | `detail` | 情況 |
+| ------ | -------- | ---- |
+| 400 | `ambiguous_authorization_headers` | 除了單一 `Authorization` 外還帶有名稱以 `authorization` 開頭的 header（gateway 所有路由皆同） |
+| 401 | `missing_token` | 沒有 token（不觸及資料庫） |
+| 401 | `invalid_token` | 簽章、issuer、audience、到期時間或 `azp` 不符 |
+| 403 | `role_required` | 缺少 `compliance_supervisor` 或該筆審批要求的角色 |
+| 403 | `self_approval_forbidden` | 核准者是委託人本人 |
+| 404 | `approval_not_found` | 審批不存在 |
+| 409 | `approval_not_pending` | 審批已核准、駁回或使用 |
+| 409 | `approval_expired` | 審批已過期 |
+| 422 | （FastAPI 驗證錯誤） | `comment` 超過 2000 字或 `status` 不是審批狀態 |
+| 500 | `governance_store_error` | 其他資料庫錯誤 |
+| 503 | `governance_store_unavailable` | 資料庫連不上 |
 
 ### 端到端示範
 
@@ -172,7 +202,7 @@ uv run ruff format . && uv run ruff check .
 uv run mypy src
 ```
 
-整合測試以 `.env` 的 `GOV_TEST_DATABASE_URL` 連到 `127.0.0.1:55433` 的 `governance_test` 資料庫（不存在時自動建立）；未設定或 gateway 未啟動時對應的測試會跳過，確認結果是 16 passed 而非 skipped。升級 LiteLLM 前必須先跑 `uv run pytest -m integration`。
+整合測試以 `.env` 的 `GOV_TEST_DATABASE_URL` 連到 `127.0.0.1:55433` 的 `governance_test` 資料庫（不存在時自動建立；fixture 會 DROP TABLE，資料庫名稱不是 `_test` 結尾時跳過）；未設定或 gateway 未啟動時對應的測試會跳過，確認結果是 16 passed 而非 skipped。升級 LiteLLM 前必須先跑 `uv run pytest -m integration`。
 
 ## 已知限制
 
@@ -180,6 +210,8 @@ uv run mypy src
 - `list_mcp_tools` 不經治理；未註冊版本的 key 仍可能看到 tool，但呼叫時會被拒絕
 - OPA 與 account_ops 本身不驗證呼叫者，靠 `governed` 內部網路（`internal: true`，只有 gateway 加入）隔離
 - 已解決：LiteLLM 以任一 `Authorization*` header 做 OBO、hook 只驗 `Authorization`，曾可讓稽核與上游身分不一致；現在所有路由（含 MCP 與 `/v1/responses` 等 LLM 端點）上，名稱以 `authorization` 開頭的 header 不是恰好一個 `Authorization` 時一律回 `400 ambiguous_authorization_headers`
+- 治理信任 LiteLLM 的管理介面：LiteLLM 管理者可在 key 或 team 的 metadata 設定 `disable_global_guardrails` 或 `opted_out_global_guardrails`，讓該 key 的 MCP 呼叫略過治理；須限制可管理 key 與 team 的人員，並稽核其 metadata
+- `/mcp-rest/tools/call` 被治理擋下時回 HTTP 500，治理的 JSON 訊息包在 `detail.message` 字串中（MCP client 經 `/mcp` 取得的是 `isError=True` 的 tool result）
 - LiteLLM 會把每次治理拒絕以 ERROR 等級連同 traceback 記錄
 - JWKS 無法取得時回報為 `invalid_user_token`，與 token 本身無效無法區分
 - policy 資料錯誤（未知的 risk 值、缺少 status）沿用 `risk_exceeds_agent_limit`、`agent_suspended` 原因代碼

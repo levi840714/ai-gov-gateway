@@ -27,8 +27,10 @@ def test_governance_routes_are_mounted_in_litellm():
 
 async def test_hook_fields_reach_policy_and_message_reaches_client():
     # 欄位名稱若改變，server/tool 會是空字串而被判為 unknown_tool，就拿不到 str_always_reviewed
+    # account_id 每次不同，以免沿用先前已核准的審批而被兌現
+    account_id = f"contract-{uuid.uuid4().hex[:8]}"
     result = await call_tool(
-        "kyt-agent@1.4", "alice", "file_str", {"account_id": "contract", "summary": "contract"}
+        "kyt-agent@1.4", "alice", "file_str", {"account_id": account_id, "summary": "contract"}
     )
     assert result.status == "pending_approval"
     assert result.body["reasons"] == ["str_always_reviewed"]

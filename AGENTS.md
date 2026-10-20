@@ -49,7 +49,7 @@ LiteLLM 固定在 v1.105.1：tool 定義鎖定從此版起才有；`plugin.py` �
 - **Lint / Format**：`ruff`，line-length 100
 - **型別檢查**：`mypy src`，公開函式必須有型別標註
 - **測試**：`pytest`；需要 Docker 服務的測試標記 `@pytest.mark.integration`，預設不執行
-- **設定**：`pydantic-settings` 讀取 `.env`，程式中不得寫死任何 key
+- **設定**：gateway 內的 `Settings` 以 `pydantic-settings` 從容器環境變數讀取 `GOV_*`（不讀 `.env`）；主機上的 scripts 與測試以 python-dotenv 載入 `.env`；程式中不得寫死任何 key
 - **Policy**：Rego v1（OPA 1.21.1）；修改 `policies/` 要更新 `meta/data.json` 的 `policy_version` 並通過 `opa test`
 - **服務**：`docker compose` 啟動 gateway、Postgres、Keycloak、OPA、account_ops、probe_mcp；image 一律固定版本
 

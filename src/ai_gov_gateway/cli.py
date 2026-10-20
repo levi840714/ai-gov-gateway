@@ -1,4 +1,6 @@
 import json
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -30,6 +32,9 @@ approvals_app = typer.Typer(no_args_is_help=True, help="審批")
 audit_app = typer.Typer(no_args_is_help=True, help="稽核")
 app.add_typer(approvals_app, name="approvals")
 app.add_typer(audit_app, name="audit")
+
+
+BAD_RESPONSE = "閘道回應格式不正確"
 
 
 def make_client() -> httpx.Client:
@@ -94,7 +99,16 @@ def _request(
     try:
         return response.json()
     except ValueError as error:
-        raise _fail("閘道回應格式不正確") from error
+        raise _fail(BAD_RESPONSE) from error
+
+
+@contextmanager
+def _expected_shape() -> Iterator[None]:
+    """JSON 合法但欄位或型別不符時，以結束碼 1 結束而不是印出 traceback。"""
+    try:
+        yield
+    except (KeyError, TypeError, AttributeError) as error:
+        raise _fail(BAD_RESPONSE) from error
 
 
 def _error_detail(response: httpx.Response) -> str:
@@ -122,10 +136,14 @@ def list_approvals(
     show_all: Annotated[bool, typer.Option("--all", help="列出所有狀態")] = False,
 ) -> None:
     rows = _request("GET", "/approvals", params=None if show_all else {"status": status.value})
+    if not isinstance(rows, list):
+        raise _fail(BAD_RESPONSE)
     if not rows:
         typer.echo("沒有符合的審批")
-    for row in rows:
-        typer.echo(_line(row))
+    with _expected_shape():
+        lines = [_line(row) for row in rows]
+    for line in lines:
+        typer.echo(line)
 
 
 @approvals_app.command("show")
@@ -138,18 +156,22 @@ def show(approval_id: str) -> None:
 @approvals_app.command("approve")
 def approve(approval_id: str, comment: Annotated[str, typer.Option()] = "") -> None:
     row = _request("POST", f"/approvals/{approval_id}/approve", body={"comment": comment})
-    typer.echo(_line(row))
+    with _expected_shape():
+        typer.echo(_line(row))
 
 
 @approvals_app.command("reject")
 def reject(approval_id: str, comment: Annotated[str, typer.Option()] = "") -> None:
     row = _request("POST", f"/approvals/{approval_id}/reject", body={"comment": comment})
-    typer.echo(_line(row))
+    with _expected_shape():
+        typer.echo(_line(row))
 
 
 @audit_app.command("verify")
 def verify() -> None:
     result = _request("GET", "/audit/verify")
-    if result["first_invalid_id"] is not None:
-        raise _fail(f"稽核紀錄被竄改：第一筆不一致的 id 為 {result['first_invalid_id']}")
-    typer.echo(f"稽核紀錄完整（{result['records']} 筆）")
+    with _expected_shape():
+        first_invalid_id, records = result["first_invalid_id"], result["records"]
+    if first_invalid_id is not None:
+        raise _fail(f"稽核紀錄被竄改：第一筆不一致的 id 為 {first_invalid_id}")
+    typer.echo(f"稽核紀錄完整（{records} 筆）")

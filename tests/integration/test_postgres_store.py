@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 import psycopg
 import pytest
 from dotenv import load_dotenv
+from psycopg.conninfo import conninfo_to_dict
 
 from ai_gov_gateway.engine.audit import first_invalid
 from ai_gov_gateway.engine.models import (
@@ -46,6 +47,9 @@ def _approval(approval_id: str, fingerprint: str = "fp") -> Approval:
 async def store() -> PostgresStore:
     if not URL:
         pytest.skip("GOV_TEST_DATABASE_URL not set")
+    # fixture 會 DROP TABLE，只在名稱以 _test 結尾的資料庫上執行
+    if not str(conninfo_to_dict(URL).get("dbname", "")).endswith("_test"):
+        pytest.skip("GOV_TEST_DATABASE_URL must point at a database whose name ends with _test")
     store = PostgresStore(URL)
     await store.ensure_schema()
     async with await psycopg.AsyncConnection.connect(URL) as conn:
