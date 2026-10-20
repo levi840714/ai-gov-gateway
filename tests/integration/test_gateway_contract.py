@@ -7,7 +7,8 @@ import httpx
 import pytest
 
 from scripts.agent_sim import call_tool
-from scripts.env import LITELLM_URL
+from scripts.env import KEYS_FILE, LITELLM_URL
+from scripts.kc import user_token
 
 pytestmark = pytest.mark.integration
 
@@ -56,3 +57,31 @@ async def test_arguments_reach_policy():
         "kyt-agent@1.4", "alice", "freeze_account", {**arguments, "amount_usd": 5000}
     )
     assert small.status == "allowed"
+
+
+def _initialize(extra_headers: dict[str, str]) -> httpx.Response:
+    headers = {
+        "x-litellm-api-key": f"Bearer {json.loads(KEYS_FILE.read_text())['kyt-agent@1.4']}",
+        "Authorization": f"Bearer {user_token('alice')}",
+        "Accept": "application/json, text/event-stream",
+        **extra_headers,
+    }
+    request = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": {"name": "contract", "version": "0"},
+        },
+    }
+    return httpx.post(f"{LITELLM_URL}/mcp", json=request, headers=headers, timeout=10)
+
+
+def test_second_authorization_header_is_rejected():
+    # LiteLLM 以 Authorization-* 做 OBO、hook 只驗 Authorization；兩者不一致時稽核與上游身分會分裂
+    rejected = _initialize({"Authorization-Obo": f"Bearer {user_token('bob')}"})
+    assert rejected.status_code == 400
+    assert rejected.json() == {"detail": "ambiguous_authorization_headers"}
+    assert _initialize({}).status_code == 200

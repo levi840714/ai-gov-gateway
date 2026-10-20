@@ -172,13 +172,14 @@ uv run ruff format . && uv run ruff check .
 uv run mypy src
 ```
 
-整合測試以 `.env` 的 `GOV_TEST_DATABASE_URL` 連到 `127.0.0.1:55433` 的 `governance_test` 資料庫（不存在時自動建立）；未設定或 gateway 未啟動時對應的測試會跳過，確認結果是 14 passed 而非 skipped。升級 LiteLLM 前必須先跑 `uv run pytest -m integration`。
+整合測試以 `.env` 的 `GOV_TEST_DATABASE_URL` 連到 `127.0.0.1:55433` 的 `governance_test` 資料庫（不存在時自動建立）；未設定或 gateway 未啟動時對應的測試會跳過，確認結果是 15 passed 而非 skipped。升級 LiteLLM 前必須先跑 `uv run pytest -m integration`。
 
 ## 已知限制
 
 - 只記錄決策，不記錄下游執行結果；核准在放行當下標記為 used，下游失敗需重新申請
 - `list_mcp_tools` 不經治理；未註冊版本的 key 仍可能看到 tool，但呼叫時會被拒絕
 - OPA 與 account_ops 本身不驗證呼叫者，靠 `governed` 內部網路（`internal: true`，只有 gateway 加入）隔離
+- MCP 路由上名稱以 `authorization` 開頭的 header 不是恰好一個 `Authorization` 時（如另帶 `Authorization-Obo`）一律回 `400 ambiguous_authorization_headers`；`/v1/responses` 等 LLM 端點內的 MCP tool 呼叫不在檢查範圍
 - LiteLLM 會把每次治理拒絕以 ERROR 等級連同 traceback 記錄
 - JWKS 無法取得時回報為 `invalid_user_token`，與 token 本身無效無法區分
 - policy 資料錯誤（未知的 risk 值、缺少 status）沿用 `risk_exceeds_agent_limit`、`agent_suspended` 原因代碼

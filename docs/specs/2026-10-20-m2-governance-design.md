@@ -338,3 +338,4 @@ M1 腳本的回歸：
 | API 錯誤代碼 | 未說明 | 沒有 token 時先回 `401 missing_token`，不觸及資料庫；資料庫連不上回 `503 governance_store_unavailable`，其他資料庫錯誤回 `500 governance_store_error`；hook 遇到資料庫中斷時拒絕原因為 `governance_store_unavailable`；`comment` 最多 2000 字 | 未登入的請求不應能探測後端狀態；呼叫端要能區分暫時性與永久性錯誤 |
 | CLI 錯誤處理 | 未說明 | 網路錯誤與格式不正確的回應以結束碼 1 結束，只印例外類別名稱；device flow 以伺服器給的 `expires_in` 為期限；token 檔案 0600、目錄 0700；`--status` 限定為審批狀態列舉 | 例外訊息可能含 URL 或標頭；避免無限輪詢與其他使用者讀取 token |
 | 內部網路 | OPA 只以不開 port 隔離 | `opa`、`account_ops` 只加入 `governed` 網路（`internal: true`），gateway 同時加入 default 與 `governed` | 兩者不驗證呼叫者；審查時從 `probe_mcp` 容器可直接對 account_ops 呼叫 `tools/list` |
+| 身分 header | 未說明 | MCP 路由（`/mcp`、`/mcp-rest`、`/v1/mcp`、`/toolset/<名稱>/mcp`、`/<server>/mcp`）上，名稱以 `authorization` 開頭的 header 不是恰好一個 `Authorization` 時（如多一個 `Authorization-Obo`、重複的 `Authorization`）一律回 `400 ambiguous_authorization_headers` | LiteLLM v1.105.1 以任一 `Authorization*` header 做 OBO，hook 只驗 `Authorization`；審查時以 `Authorization-Obo` 讓稽核記錄 alice、上游收到 bob |

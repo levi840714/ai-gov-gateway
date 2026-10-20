@@ -1,7 +1,24 @@
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 from ai_gov_gateway.engine.models import ToolCall
+
+# LiteLLM v1.105.1 的 MCP 路由：/mcp、/mcp/…、/mcp-rest/…、/v1/mcp/…、
+# /toolset/<名稱>/mcp 與 /<server>/mcp
+_MCP_PATH_PREFIXES = ("/mcp", "/v1/mcp", "/toolset/")
+
+
+def is_mcp_path(path: str) -> bool:
+    return path.startswith(_MCP_PATH_PREFIXES) or path.rstrip("/").endswith("/mcp")
+
+
+def has_ambiguous_authorization(header_names: Iterable[str]) -> bool:
+    """LiteLLM 以名稱開頭為 authorization 的任一 header 做 OBO，hook 只看 Authorization。
+
+    多於一個時稽核的使用者與上游收到的使用者可能不同，因此只接受單一 Authorization。
+    """
+    names = [name.lower() for name in header_names if name.lower().startswith("authorization")]
+    return names not in ([], ["authorization"])
 
 
 def _bearer(value: object) -> str | None:
