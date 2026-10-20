@@ -104,7 +104,19 @@
       "serviceAccountsEnabled": true,
       "attributes": {
         "standard.token.exchange.enabled": "true"
-      }
+      },
+      "protocolMappers": [
+        {
+          "name": "aud-ai-gateway",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.client.audience": "ai-gateway",
+            "access.token.claim": "true",
+            "id.token.claim": "false"
+          }
+        }
+      ]
     },
     {
       "clientId": "probe-mcp",
