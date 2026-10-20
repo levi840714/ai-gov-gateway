@@ -28,7 +28,7 @@ async def run(key_alias: str, user: str | None) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--key", default="kyt-agent-mcp")
+    parser.add_argument("--key", default="kyt-agent@1.4")
     parser.add_argument("--user", default="alice", help="use '' to send no user token")
     args = parser.parse_args()
     asyncio.run(run(args.key, args.user or None))

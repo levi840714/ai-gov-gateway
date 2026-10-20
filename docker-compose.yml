@@ -21,7 +21,7 @@ services:
     environment:
       PROBE_WHOAMI_DESCRIPTION: ${PROBE_WHOAMI_DESCRIPTION:-Return the headers and bearer token claims this server received.}
     ports:
-      - "8100:8100"
+      - "127.0.0.1:8100:8100"
 
   postgres:
     image: postgres:17.6
