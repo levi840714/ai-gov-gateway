@@ -1,9 +1,9 @@
 import asyncio
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ai_gov_gateway.engine.approvals import ApprovalDetail, ApprovalError, AuditVerification
 from ai_gov_gateway.engine.models import Approval, ApprovalStatus, UserIdentity
@@ -14,20 +14,33 @@ from ai_gov_gateway.runtime import Services, get_services
 router = APIRouter(prefix="/governance", tags=["governance"])
 bearer = HTTPBearer(auto_error=False)
 
-ServicesDep = Annotated[Services, Depends(get_services)]
-
 
 class ReviewBody(BaseModel):
-    comment: str = ""
+    comment: str = Field(default="", max_length=2000)
+
+
+async def resolve_services(request: Request) -> Services:
+    # 經 dependency_overrides 查詢，測試才能替換 get_services
+    provider = request.app.dependency_overrides.get(get_services, get_services)
+    try:
+        return await provider()
+    except StoreUnavailable as error:
+        raise HTTPException(503, "governance_store_unavailable") from error
+    except StoreError as error:
+        raise HTTPException(500, "governance_store_error") from error
+
+
+ServicesDep = Annotated[Services, Depends(resolve_services)]
 
 
 async def current_user(
-    services: ServicesDep,
+    request: Request,
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
 ) -> UserIdentity:
     # 審批以 IdP 的使用者身份驗證，不使用 LiteLLM virtual key：maker-checker 需要知道核准者是誰
     if credentials is None:
         raise HTTPException(status_code=401, detail="missing_token")
+    services = await resolve_services(request)
     try:
         return await asyncio.to_thread(services.verifier.verify, credentials.credentials)
     except TokenError as error:
@@ -42,7 +55,7 @@ def _http_error(error: Exception) -> HTTPException:
         return HTTPException(status_code=error.status_code, detail=error.code)
     if isinstance(error, StoreUnavailable):
         return HTTPException(status_code=503, detail="governance_store_unavailable")
-    return HTTPException(status_code=500, detail="audit_write_failed")
+    return HTTPException(status_code=500, detail="governance_store_error")
 
 
 FAILURES = (ApprovalError, StoreUnavailable, StoreError)

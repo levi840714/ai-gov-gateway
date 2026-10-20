@@ -8,14 +8,20 @@ from ai_gov_gateway.api.approvals import router
 from ai_gov_gateway.engine.approvals import ApprovalService
 from ai_gov_gateway.engine.engine import GovernanceEngine
 from ai_gov_gateway.engine.models import Decision, ToolCall
+from ai_gov_gateway.engine.store import StoreError, StoreUnavailable
 from ai_gov_gateway.runtime import Services, get_services
 from tests.fakes import FakeClock, FakePolicy, InMemoryStore, id_sequence, policy_result
 from tests.jwt_helpers import alice_token, bob_token, carol_token, make_verifier
 
 
 @pytest.fixture
-def services() -> Services:
-    clock, store, verifier = FakeClock(), InMemoryStore(), make_verifier()
+def store() -> InMemoryStore:
+    return InMemoryStore()
+
+
+@pytest.fixture
+def services(store: InMemoryStore) -> Services:
+    clock, verifier = FakeClock(), make_verifier()
     policy = FakePolicy(policy_result(Decision.REQUIRE_APPROVAL, "amount_over_threshold"))
     engine = GovernanceEngine(
         verifier=verifier,
@@ -97,3 +103,65 @@ async def test_audit_verify(client, services):
     await _pending(services)
     response = client.get("/governance/audit/verify", headers=_auth(bob_token()))
     assert response.json() == {"records": 1, "first_invalid_id": None}
+
+
+def _client_with_failing_services(error: Exception) -> TestClient:
+    app = FastAPI()
+    app.include_router(router)
+
+    async def failing() -> Services:
+        raise error
+
+    app.dependency_overrides[get_services] = failing
+    return TestClient(app)
+
+
+def test_store_unavailable_when_building_services():
+    failing = _client_with_failing_services(StoreUnavailable("down"))
+    response = failing.get("/governance/approvals", headers=_auth(bob_token()))
+    assert (response.status_code, response.json()["detail"]) == (
+        503,
+        "governance_store_unavailable",
+    )
+
+
+def test_missing_token_wins_over_service_failure():
+    failing = _client_with_failing_services(StoreUnavailable("down"))
+    response = failing.get("/governance/approvals")
+    assert (response.status_code, response.json()["detail"]) == (401, "missing_token")
+
+
+def test_store_error_when_building_services():
+    failing = _client_with_failing_services(StoreError("boom"))
+    response = failing.get("/governance/approvals", headers=_auth(bob_token()))
+    assert (response.status_code, response.json()["detail"]) == (500, "governance_store_error")
+
+
+def test_store_error_on_list_is_neutral_500(client, store):
+    store.fail = StoreError("boom")
+    response = client.get("/governance/approvals", headers=_auth(bob_token()))
+    assert (response.status_code, response.json()["detail"]) == (500, "governance_store_error")
+
+
+async def test_analyst_forbidden_on_audit_verify_and_approve(client, services):
+    approval_id = await _pending(services)
+    verify = client.get("/governance/audit/verify", headers=_auth(alice_token()))
+    assert (verify.status_code, verify.json()["detail"]) == (403, "role_required")
+    approve = client.post(
+        f"/governance/approvals/{approval_id}/approve", json={}, headers=_auth(alice_token())
+    )
+    assert (approve.status_code, approve.json()["detail"]) == (403, "role_required")
+
+
+def test_post_approve_requires_token(client):
+    response = client.post("/governance/approvals/apr_1/approve", json={})
+    assert (response.status_code, response.json()["detail"]) == (401, "missing_token")
+
+
+def test_comment_too_long_is_rejected(client):
+    response = client.post(
+        "/governance/approvals/apr_1/approve",
+        json={"comment": "x" * 2001},
+        headers=_auth(bob_token()),
+    )
+    assert response.status_code == 422

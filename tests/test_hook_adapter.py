@@ -28,3 +28,11 @@ def test_strips_bearer_prefix():
 def test_missing_fields_become_empty_and_fail_closed_downstream():
     call = tool_call_from_hook({}, None)
     assert (call.server, call.tool, call.arguments, call.user_token) == ("", "", {}, None)
+
+
+def test_non_string_token_becomes_none():
+    assert tool_call_from_hook(M1_DATA | {"incoming_bearer_token": 123}, None).user_token is None
+
+
+def test_non_dict_arguments_become_empty():
+    assert tool_call_from_hook(M1_DATA | {"mcp_arguments": ["a"]}, None).arguments == {}

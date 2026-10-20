@@ -29,6 +29,7 @@ from ai_gov_gateway.engine.store import (
 # 固定的 advisory lock key，讓多個 worker 寫入稽核時 hash chain 維持單一序列
 AUDIT_LOCK_KEY = 72_410_001
 ONE_OPEN_INDEX = "approvals_one_open"
+CONNECT_TIMEOUT_SECONDS = 5
 
 # arguments 與 reasons 用 json 而非 jsonb：jsonb 會改寫數字（1e22、-0.0），
 # 讀回後的 hash 就對不上。
@@ -158,12 +159,18 @@ class PostgresStore:
             await conn.execute(SCHEMA)
 
     async def _ensure_database(self) -> None:
-        name = str(conninfo_to_dict(self._url).get("dbname") or "")
+        try:
+            name = str(conninfo_to_dict(self._url).get("dbname") or "")
+            admin_url = make_conninfo(self._url, dbname="postgres")
+        except psycopg.Error:
+            # 不串接原例外：訊息可能含連線字串
+            raise StoreError("invalid database_url") from None
         if not name:
             raise StoreError("database_url has no dbname")
-        admin_url = make_conninfo(self._url, dbname="postgres")
         try:
-            async with await psycopg.AsyncConnection.connect(admin_url, autocommit=True) as conn:
+            async with await psycopg.AsyncConnection.connect(
+                admin_url, autocommit=True, connect_timeout=CONNECT_TIMEOUT_SECONDS
+            ) as conn:
                 cursor = await conn.execute("SELECT 1 FROM pg_database WHERE datname = %s", (name,))
                 if await cursor.fetchone() is None:
                     await conn.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
@@ -175,7 +182,9 @@ class PostgresStore:
     @asynccontextmanager
     async def _connect(self) -> AsyncIterator[psycopg.AsyncConnection[DictRow]]:
         try:
-            conn = await psycopg.AsyncConnection.connect(self._url, row_factory=dict_row)
+            conn = await psycopg.AsyncConnection.connect(
+                self._url, row_factory=dict_row, connect_timeout=CONNECT_TIMEOUT_SECONDS
+            )
         except psycopg.OperationalError as error:
             raise StoreUnavailable(str(error)) from error
         try:

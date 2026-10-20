@@ -11,6 +11,7 @@ from litellm.proxy.proxy_server import app
 
 from ai_gov_gateway.api.approvals import router
 from ai_gov_gateway.engine.models import Outcome
+from ai_gov_gateway.engine.store import StoreUnavailable
 from ai_gov_gateway.hook_adapter import tool_call_from_hook
 from ai_gov_gateway.runtime import get_services
 
@@ -34,6 +35,9 @@ class GovernanceGuardrail(CustomGuardrail):
         try:
             call = tool_call_from_hook(data, getattr(user_api_key_dict, "key_alias", None))
             outcome = await (await get_services()).engine.decide(call)
+        except StoreUnavailable:
+            logger.error("governance store unavailable")
+            outcome = Outcome.denied(["governance_store_unavailable"])
         except Exception:
             logger.exception("governance decision failed")
             outcome = Outcome.denied(["governance_internal_error"])
