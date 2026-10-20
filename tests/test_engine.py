@@ -1,3 +1,4 @@
+import asyncio
 from datetime import timedelta
 
 import pytest
@@ -8,6 +9,16 @@ from ai_gov_gateway.engine.models import ApprovalStatus, Decision, ToolCall
 from ai_gov_gateway.engine.store import StoreError, StoreUnavailable
 from tests.fakes import FakeClock, FakePolicy, InMemoryStore, id_sequence, policy_result
 from tests.jwt_helpers import alice_token, make_token, make_verifier
+
+
+class InterleavingStore(InMemoryStore):
+    """open_approval 讓出控制權，讓並發請求交錯。"""
+
+    async def open_approval(self, fingerprint):
+        result = await super().open_approval(fingerprint)
+        await asyncio.sleep(0)
+        return result
+
 
 NEEDS_APPROVAL = policy_result(Decision.REQUIRE_APPROVAL, "amount_over_threshold")
 
@@ -168,3 +179,44 @@ async def test_audit_failure_denies(engine, store):
     store.fail = StoreError("insert failed")
     outcome = await engine.decide(freeze(5000))
     assert outcome.reasons == ["audit_write_failed"]
+
+
+def interleaving_engine(clock, store, policy) -> GovernanceEngine:
+    return GovernanceEngine(
+        verifier=make_verifier(),
+        policy=policy,
+        store=store,
+        approval_ttl=timedelta(hours=24),
+        approver_role="compliance_supervisor",
+        clock=clock,
+        new_id=id_sequence(),
+    )
+
+
+async def test_concurrent_redemption_allows_once_and_shares_new_approval(clock, policy):
+    store = InterleavingStore()
+    engine = interleaving_engine(clock, store, policy)
+    policy.decision = NEEDS_APPROVAL
+    await engine.decide(freeze())
+    await store.transition(
+        "apr_1", from_statuses=(ApprovalStatus.PENDING,), to=ApprovalStatus.APPROVED, at=clock()
+    )
+    outcomes = await asyncio.gather(*(engine.decide(freeze()) for _ in range(5)))
+    allowed = [o for o in outcomes if o.status == "allowed"]
+    pending = [o for o in outcomes if o.status == "pending_approval"]
+    assert len(allowed) == 1
+    assert len(pending) == 4
+    assert len({o.approval_id for o in pending}) == 1
+    assert store.approvals["apr_1"].status is ApprovalStatus.USED
+    assert first_invalid(store.audit) is None
+
+
+async def test_concurrent_first_requests_share_one_approval(clock, policy):
+    store = InterleavingStore()
+    engine = interleaving_engine(clock, store, policy)
+    policy.decision = NEEDS_APPROVAL
+    outcomes = await asyncio.gather(*(engine.decide(freeze()) for _ in range(3)))
+    assert {o.status for o in outcomes} == {"pending_approval"}
+    assert len({o.approval_id for o in outcomes}) == 1
+    assert len(store.approvals) == 1
+    assert first_invalid(store.audit) is None

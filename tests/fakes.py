@@ -13,7 +13,7 @@ from ai_gov_gateway.engine.models import (
     UserIdentity,
 )
 from ai_gov_gateway.engine.policy import PolicyError
-from ai_gov_gateway.engine.store import transition_columns
+from ai_gov_gateway.engine.store import ApprovalConflict, transition_columns
 
 OPEN = (ApprovalStatus.PENDING, ApprovalStatus.APPROVED)
 
@@ -74,6 +74,11 @@ class InMemoryStore:
 
     async def create_approval(self, approval: Approval, audit: AuditEvent) -> AuditRecord:
         self._check()
+        if any(
+            a.fingerprint == approval.fingerprint and a.status in OPEN
+            for a in self.approvals.values()
+        ):
+            raise ApprovalConflict(approval.fingerprint)
         record = self._next_record(audit, approval.created_at)
         self.approvals[approval.id] = approval.model_copy(deep=True)
         self.audit.append(record)

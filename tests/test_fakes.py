@@ -4,7 +4,7 @@ import pytest
 
 from ai_gov_gateway.engine.audit import first_invalid
 from ai_gov_gateway.engine.models import AgentRef, Approval, ApprovalStatus, AuditEvent
-from ai_gov_gateway.engine.store import StoreUnavailable
+from ai_gov_gateway.engine.store import ApprovalConflict, StoreUnavailable
 from tests.fakes import FakeClock, InMemoryStore
 
 
@@ -111,3 +111,13 @@ async def test_reads_return_copies():
     (await store.open_approval("f")).arguments["x"] = 1
     assert store.approvals["apr_1"].status is ApprovalStatus.PENDING
     assert store.approvals["apr_1"].arguments == {}
+
+
+async def test_create_approval_rejects_second_open_approval_for_fingerprint():
+    clock, store = FakeClock(), InMemoryStore()
+    await store.create_approval(_approval(clock), AuditEvent(event_type="approval_requested"))
+    second = _approval(clock).model_copy(update={"id": "apr_2"})
+    with pytest.raises(ApprovalConflict):
+        await store.create_approval(second, AuditEvent(event_type="approval_requested"))
+    assert list(store.approvals) == ["apr_1"]
+    assert len(store.audit) == 1

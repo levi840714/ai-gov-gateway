@@ -18,6 +18,10 @@ class StoreError(Exception):
     """資料庫操作失敗（連線以外的原因）。"""
 
 
+class ApprovalConflict(Exception):
+    """同一 fingerprint 已有 pending 或 approved 的審批。"""
+
+
 class GovernanceStore(Protocol):
     async def open_approval(self, fingerprint: str) -> Approval | None:
         """同一 fingerprint 中最新一筆 pending 或 approved 的審批。"""
@@ -30,7 +34,11 @@ class GovernanceStore(Protocol):
     async def list_approvals(self, status: ApprovalStatus | None) -> list[Approval]: ...
 
     async def create_approval(self, approval: Approval, audit: AuditEvent) -> AuditRecord:
-        """建立審批並在同一個 transaction 寫入稽核。"""
+        """建立審批並在同一個 transaction 寫入稽核。
+
+        同一 fingerprint 已有 pending 或 approved 的審批時 raise ApprovalConflict，
+        實作必須保證每個 fingerprint 至多一筆未結案審批。
+        """
         ...
 
     async def transition(

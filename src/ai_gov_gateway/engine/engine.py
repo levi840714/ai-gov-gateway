@@ -20,10 +20,16 @@ from ai_gov_gateway.engine.models import (
     UserIdentity,
 )
 from ai_gov_gateway.engine.policy import PolicyClient, PolicyError
-from ai_gov_gateway.engine.store import GovernanceStore, StoreError, StoreUnavailable
+from ai_gov_gateway.engine.store import (
+    ApprovalConflict,
+    GovernanceStore,
+    StoreError,
+    StoreUnavailable,
+)
 from ai_gov_gateway.engine.tokens import TokenError, TokenVerifier
 
 OPEN_STATUSES = (ApprovalStatus.PENDING, ApprovalStatus.APPROVED)
+MAX_ATTEMPTS = 3
 
 
 class _Denied(Exception):
@@ -116,33 +122,50 @@ class GovernanceEngine:
         self, agent: AgentRef, user: UserIdentity, call: ToolCall, decision: PolicyDecision
     ) -> Outcome:
         fingerprint = call_fingerprint(agent, user.sub, call.server, call.tool, call.arguments)
-        now = self._clock()
-        existing = await self._current_approval(fingerprint)
-        if existing is not None and existing.status is ApprovalStatus.APPROVED:
-            outcome = Outcome.allowed(decision.reasons)
-            redeemed = self._event(
-                "approval_redeemed",
-                call,
-                agent,
-                user,
-                outcome,
-                decision.policy_version,
-                existing.id,
-            )
-            if await self._store.transition(
-                existing.id,
-                from_statuses=(ApprovalStatus.APPROVED,),
-                to=ApprovalStatus.USED,
-                at=now,
-                audit=redeemed,
-            ):
-                return outcome
-            # 同一個核准被另一個請求搶先使用；重新查詢後依現況處理
+        # 並發請求可能搶先使用或建立審批，重新查詢後依現況處理；超過次數就拒絕
+        for _ in range(MAX_ATTEMPTS):
             existing = await self._current_approval(fingerprint)
-        if existing is not None and existing.status is ApprovalStatus.PENDING:
-            outcome = Outcome.pending(existing.id, existing.expires_at, decision.reasons)
-            await self._record(call, agent, user, outcome, decision.policy_version, existing.id)
-            return outcome
+            if existing is None:
+                outcome = await self._create_pending(agent, user, call, decision, fingerprint)
+            elif existing.status is ApprovalStatus.APPROVED:
+                outcome = await self._redeem(agent, user, call, decision, existing)
+            else:
+                outcome = Outcome.pending(existing.id, existing.expires_at, decision.reasons)
+                await self._record(call, agent, user, outcome, decision.policy_version, existing.id)
+            if outcome is not None:
+                return outcome
+        raise _Denied("approval_conflict")
+
+    async def _redeem(
+        self,
+        agent: AgentRef,
+        user: UserIdentity,
+        call: ToolCall,
+        decision: PolicyDecision,
+        approval: Approval,
+    ) -> Outcome | None:
+        outcome = Outcome.allowed(decision.reasons)
+        redeemed = self._event(
+            "approval_redeemed", call, agent, user, outcome, decision.policy_version, approval.id
+        )
+        used = await self._store.transition(
+            approval.id,
+            from_statuses=(ApprovalStatus.APPROVED,),
+            to=ApprovalStatus.USED,
+            at=self._clock(),
+            audit=redeemed,
+        )
+        return outcome if used else None
+
+    async def _create_pending(
+        self,
+        agent: AgentRef,
+        user: UserIdentity,
+        call: ToolCall,
+        decision: PolicyDecision,
+        fingerprint: str,
+    ) -> Outcome | None:
+        now = self._clock()
         approval = Approval(
             id=self._new_id(),
             fingerprint=fingerprint,
@@ -162,7 +185,10 @@ class GovernanceEngine:
         requested = self._event(
             "approval_requested", call, agent, user, outcome, decision.policy_version, approval.id
         )
-        await self._store.create_approval(approval, requested)
+        try:
+            await self._store.create_approval(approval, requested)
+        except ApprovalConflict:
+            return None
         return outcome
 
     async def _current_approval(self, fingerprint: str) -> Approval | None:
