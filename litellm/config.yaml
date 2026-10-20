@@ -29,10 +29,19 @@ mcp_servers:
           required: [text]
           title: echoArguments
           type: object
+  account_ops:
+    url: "http://account_ops:8200/mcp"
+    transport: "http"
+    auth_type: oauth2_token_exchange
+    token_exchange_endpoint: "http://keycloak:8080/realms/governance/protocol/openid-connect/token"
+    client_id: "ai-gateway"
+    client_secret: os.environ/AI_GATEWAY_CLIENT_SECRET
+    audience: "account-ops"
 
 guardrails:
   - guardrail_name: governance
     litellm_params:
-      guardrail: governance_hook.GovernanceHook
+      # 載入此模組時也會把 /governance 路由掛到 LiteLLM 的 app
+      guardrail: ai_gov_gateway.plugin.GovernanceGuardrail
       mode: pre_mcp_call
       default_on: true
