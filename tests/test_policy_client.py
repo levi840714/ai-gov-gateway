@@ -38,10 +38,15 @@ def _raise_connect(request: httpx.Request) -> httpx.Response:
     raise httpx.ConnectError("connection refused", request=request)
 
 
+def _raise_timeout(request: httpx.Request) -> httpx.Response:
+    raise httpx.ReadTimeout("slow", request=request)
+
+
 @pytest.mark.parametrize(
     ("handler", "code"),
     [
         (_raise_connect, "policy_unavailable"),
+        (_raise_timeout, "policy_unavailable"),
         (lambda request: httpx.Response(500, json={}), "policy_unavailable"),
         (lambda request: httpx.Response(200, json={}), "policy_error"),
         (
@@ -50,9 +55,18 @@ def _raise_connect(request: httpx.Request) -> httpx.Response:
         ),
         (lambda request: httpx.Response(200, text="not json"), "policy_error"),
     ],
-    ids=["connect", "server-error", "no-result", "bad-decision", "not-json"],
+    ids=["connect", "timeout", "server-error", "no-result", "bad-decision", "not-json"],
 )
 async def test_failures_map_to_codes(handler, code):
     with pytest.raises(PolicyError) as error:
         await _client(handler).evaluate({})
     assert error.value.code == code
+
+
+async def test_unserializable_input_is_policy_error():
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("request must not be sent")
+
+    with pytest.raises(PolicyError) as error:
+        await _client(handler).evaluate({"x": float("nan")})
+    assert error.value.code == "policy_error"

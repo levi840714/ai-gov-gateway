@@ -44,37 +44,40 @@ class InMemoryStore:
         if self.fail is not None:
             raise self.fail
 
-    def _append(self, event: AuditEvent, ts: datetime) -> AuditRecord:
+    def _next_record(self, event: AuditEvent, ts: datetime) -> AuditRecord:
         prev = self.audit[-1].hash if self.audit else GENESIS_HASH
-        record = build_record(record_id=len(self.audit) + 1, prev_hash=prev, ts=ts, event=event)
-        self.audit.append(record)
-        return record
+        return build_record(record_id=len(self.audit) + 1, prev_hash=prev, ts=ts, event=event)
 
     async def open_approval(self, fingerprint: str) -> Approval | None:
         self._check()
         matches = [
             a for a in self.approvals.values() if a.fingerprint == fingerprint and a.status in OPEN
         ]
-        return max(matches, key=lambda a: a.created_at, default=None)
+        latest = max(matches, key=lambda a: a.created_at, default=None)
+        return latest.model_copy(deep=True) if latest else None
 
     async def approvals_for(self, fingerprint: str) -> list[Approval]:
         self._check()
         matches = [a for a in self.approvals.values() if a.fingerprint == fingerprint]
-        return sorted(matches, key=lambda a: a.created_at)
+        return [a.model_copy(deep=True) for a in sorted(matches, key=lambda a: a.created_at)]
 
     async def get_approval(self, approval_id: str) -> Approval | None:
         self._check()
-        return self.approvals.get(approval_id)
+        approval = self.approvals.get(approval_id)
+        return approval.model_copy(deep=True) if approval else None
 
     async def list_approvals(self, status: ApprovalStatus | None) -> list[Approval]:
         self._check()
         rows = [a for a in self.approvals.values() if status is None or a.status is status]
-        return sorted(rows, key=lambda a: a.created_at, reverse=True)
+        rows.sort(key=lambda a: a.created_at, reverse=True)
+        return [a.model_copy(deep=True) for a in rows]
 
     async def create_approval(self, approval: Approval, audit: AuditEvent) -> AuditRecord:
         self._check()
-        self.approvals[approval.id] = approval
-        return self._append(audit, approval.created_at)
+        record = self._next_record(audit, approval.created_at)
+        self.approvals[approval.id] = approval.model_copy(deep=True)
+        self.audit.append(record)
+        return record.model_copy(deep=True)
 
     async def transition(
         self,
@@ -92,18 +95,21 @@ class InMemoryStore:
         if approval is None or approval.status not in from_statuses:
             return False
         update = transition_columns(to, at, actor, comment)
+        record = self._next_record(audit, at) if audit is not None else None
         self.approvals[approval_id] = approval.model_copy(update=update)
-        if audit is not None:
-            self._append(audit, at)
+        if record is not None:
+            self.audit.append(record)
         return True
 
     async def append_audit(self, event: AuditEvent, ts: datetime) -> AuditRecord:
         self._check()
-        return self._append(event, ts)
+        record = self._next_record(event, ts)
+        self.audit.append(record)
+        return record.model_copy(deep=True)
 
     async def audit_records(self) -> list[AuditRecord]:
         self._check()
-        return list(self.audit)
+        return [r.model_copy(deep=True) for r in self.audit]
 
 
 def policy_result(decision: Decision, *reasons: str) -> PolicyDecision:

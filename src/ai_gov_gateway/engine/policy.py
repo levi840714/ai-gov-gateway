@@ -34,6 +34,9 @@ class OpaPolicyClient:
                 response.raise_for_status()
         except httpx.HTTPError as error:
             raise PolicyError("policy_unavailable") from error
+        except (TypeError, ValueError) as error:
+            # httpx 序列化 input 失敗（NaN、datetime 等）屬輸入問題，不是 OPA 不可用
+            raise PolicyError("policy_error") from error
         try:
             body = response.json()
             result = body.get("result") if isinstance(body, dict) else None
