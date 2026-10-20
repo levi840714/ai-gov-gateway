@@ -6,7 +6,7 @@ import pytest
 from ai_gov_gateway.engine.audit import first_invalid
 from ai_gov_gateway.engine.engine import GovernanceEngine
 from ai_gov_gateway.engine.models import ApprovalStatus, Decision, ToolCall
-from ai_gov_gateway.engine.store import StoreError, StoreUnavailable
+from ai_gov_gateway.engine.store import ApprovalConflict, StoreError, StoreUnavailable
 from tests.fakes import FakeClock, FakePolicy, InMemoryStore, id_sequence, policy_result
 from tests.jwt_helpers import alice_token, make_token, make_verifier
 
@@ -18,6 +18,14 @@ class InterleavingStore(InMemoryStore):
         result = await super().open_approval(fingerprint)
         await asyncio.sleep(0)
         return result
+
+
+class AlwaysConflictStore(InMemoryStore):
+    async def open_approval(self, fingerprint):
+        return None
+
+    async def create_approval(self, approval, audit):
+        raise ApprovalConflict(approval.fingerprint)
 
 
 NEEDS_APPROVAL = policy_result(Decision.REQUIRE_APPROVAL, "amount_over_threshold")
@@ -220,3 +228,17 @@ async def test_concurrent_first_requests_share_one_approval(clock, policy):
     assert len({o.approval_id for o in outcomes}) == 1
     assert len(store.approvals) == 1
     assert first_invalid(store.audit) is None
+
+
+async def test_approval_conflict_exhaustion_denies_with_one_audit_event(clock, policy):
+    store = AlwaysConflictStore()
+    engine = interleaving_engine(clock, store, policy)
+    policy.decision = NEEDS_APPROVAL
+    outcome = await engine.decide(freeze())
+    assert (outcome.status, outcome.reasons) == ("denied", ["approval_conflict"])
+    [record] = store.audit
+    assert (record.event_type, record.decision, record.reasons) == (
+        "decision",
+        "denied",
+        ["approval_conflict"],
+    )
