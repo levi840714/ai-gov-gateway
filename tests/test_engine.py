@@ -103,6 +103,10 @@ async def test_policy_deny_is_returned_and_audited(engine, store, policy):
         ({"key": "kyt-agent-mcp"}, "unregistered_agent_version"),
         ({"key": None}, "unregistered_agent_version"),
         ({"key": "kyt-agent-mcp", "token": ""}, "missing_user_token"),
+        (
+            {"token": make_token("service-account-kyt-agent", [], azp="kyt-agent")},
+            "invalid_user_token",
+        ),
     ],
 )
 async def test_rejected_before_policy(engine, store, policy, call_kwargs, reason):

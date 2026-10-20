@@ -33,6 +33,8 @@ def test_verify_accepts_audience_list():
         (make_token("alice", [], realm_access="admin"), "InvalidRealmAccess"),
         (make_token("alice", [], realm_access={"roles": "admin"}), "InvalidRealmAccess"),
         (make_token("alice", [], realm_access={"roles": [1]}), "InvalidRealmAccess"),
+        (make_token("service-account-kyt-agent", [], azp="kyt-agent"), "ClientNotAllowed"),
+        (make_token("alice", ["analyst"], azp=None), "ClientNotAllowed"),
     ],
     ids=[
         "expired",
@@ -43,6 +45,8 @@ def test_verify_accepts_audience_list():
         "realm_access_not_dict",
         "roles_not_list",
         "roles_not_strings",
+        "service_account_client",
+        "missing_azp",
     ],
 )
 def test_verify_rejects_invalid_tokens(token, expected):
@@ -67,3 +71,8 @@ def test_verify_rejects_unsigned_token():
 def test_verify_without_realm_access_yields_no_roles():
     token = make_token("alice", [], realm_access=None)
     assert make_verifier().verify(token).roles == []
+
+
+def test_verify_accepts_each_allowed_client():
+    token = make_token("bob", ["compliance_supervisor"], azp="agw-cli")
+    assert make_verifier().verify(token).username == "bob"

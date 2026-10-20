@@ -27,6 +27,7 @@ async def build_services(settings: Settings) -> Services:
     verifier = TokenVerifier(
         issuer=settings.oidc_issuer,
         audience=settings.oidc_audience,
+        allowed_clients=settings.oidc_allowed_clients,
         key_resolver=jwks_resolver(settings.oidc_jwks_url),
     )
     engine = GovernanceEngine(

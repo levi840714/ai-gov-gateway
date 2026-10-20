@@ -39,7 +39,7 @@ flowchart LR
 
 ### 決策流程
 
-1. 驗證使用者 token（JWKS、issuer、audience、到期時間）
+1. 驗證使用者 token（JWKS、issuer、audience、到期時間）；`azp` 必須在 `GOV_OIDC_ALLOWED_CLIENTS`（JSON 陣列，預設 `["kyt-cli", "agw-cli"]`）內，服務帳號的 client_credentials token 不能當成委託人
 2. 解析 `key_alias`，組成 OPA input（agent、user、tool、arguments），每次都先問 OPA
 3. OPA 回 `allow` / `deny` / `require_approval`
 4. `require_approval` 時，以 fingerprint（agent 版本、委託人、tool、參數）找已核准、未使用、未過期的審批：本次 policy 的原因都已在核准範圍內就兌現一次並放行（出現新原因時作廢舊審批、重新送審），沒有就建立或沿用 pending 審批，回傳 `approval_id`

@@ -8,6 +8,7 @@ from ai_gov_gateway.engine.tokens import TokenVerifier
 
 ISSUER = "http://localhost:8080/realms/governance"
 AUDIENCE = "ai-gateway"
+ALLOWED_CLIENTS = ["kyt-cli", "agw-cli"]
 _SIGNING_KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
 _FOREIGN_KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
 _UNSET: Any = object()
@@ -22,6 +23,7 @@ def make_token(
     expires_in: int = 300,
     foreign: bool = False,
     realm_access: Any = _UNSET,
+    azp: str | None = "kyt-cli",
 ) -> str:
     now = datetime.now(UTC)
     payload: dict[str, Any] = {
@@ -35,6 +37,8 @@ def make_token(
     }
     if realm_access is None:
         del payload["realm_access"]
+    if azp is not None:
+        payload["azp"] = azp
     key = _FOREIGN_KEY if foreign else _SIGNING_KEY
     return jwt.encode(payload, key, algorithm="RS256")
 
@@ -53,4 +57,9 @@ def carol_token() -> str:
 
 def make_verifier() -> TokenVerifier:
     public_key = _SIGNING_KEY.public_key()
-    return TokenVerifier(issuer=ISSUER, audience=AUDIENCE, key_resolver=lambda token: public_key)
+    return TokenVerifier(
+        issuer=ISSUER,
+        audience=AUDIENCE,
+        allowed_clients=ALLOWED_CLIENTS,
+        key_resolver=lambda token: public_key,
+    )

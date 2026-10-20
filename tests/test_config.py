@@ -14,6 +14,18 @@ def test_defaults_point_at_compose_services(monkeypatch):
     assert settings.approval_ttl_hours == 24
     assert settings.oidc_audience == "ai-gateway"
     assert settings.approver_role == "compliance_supervisor"
+    assert settings.oidc_allowed_clients == ["kyt-cli", "agw-cli"]
+
+
+def test_allowed_clients_are_read_as_json_list(monkeypatch):
+    monkeypatch.setenv("GOV_OIDC_ALLOWED_CLIENTS", '["agw-cli"]')
+    assert Settings().oidc_allowed_clients == ["agw-cli"]
+
+
+def test_rejects_empty_allowed_clients(monkeypatch):
+    monkeypatch.setenv("GOV_OIDC_ALLOWED_CLIENTS", "[]")
+    with pytest.raises(ValidationError):
+        Settings()
 
 
 def test_reads_gov_prefixed_environment(monkeypatch):

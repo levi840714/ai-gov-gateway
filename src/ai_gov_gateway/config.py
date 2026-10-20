@@ -13,5 +13,7 @@ class Settings(BaseSettings):
     oidc_issuer: str = "http://localhost:8080/realms/governance"
     oidc_jwks_url: str = "http://keycloak:8080/realms/governance/protocol/openid-connect/certs"
     oidc_audience: str = "ai-gateway"
+    # 只接受由使用者登入的 client 簽發的 token（azp）；環境變數以 JSON 陣列設定
+    oidc_allowed_clients: list[str] = Field(default=["kyt-cli", "agw-cli"], min_length=1)
     approval_ttl_hours: int = Field(default=24, gt=0)
     approver_role: str = "compliance_supervisor"

@@ -1,4 +1,4 @@
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import Any
 
 import jwt
@@ -13,9 +13,17 @@ class TokenError(Exception):
 
 
 class TokenVerifier:
-    def __init__(self, *, issuer: str, audience: str, key_resolver: KeyResolver) -> None:
+    def __init__(
+        self,
+        *,
+        issuer: str,
+        audience: str,
+        allowed_clients: Iterable[str],
+        key_resolver: KeyResolver,
+    ) -> None:
         self._issuer = issuer
         self._audience = audience
+        self._allowed_clients = frozenset(allowed_clients)
         self._key_resolver = key_resolver
 
     def verify(self, token: str) -> UserIdentity:
@@ -30,6 +38,9 @@ class TokenVerifier:
             )
         except jwt.PyJWTError as error:
             raise TokenError(type(error).__name__) from error
+        # 服務帳號的 client_credentials token 也有相同 audience，不能當成委託的使用者
+        if claims.get("azp") not in self._allowed_clients:
+            raise TokenError("ClientNotAllowed")
         return UserIdentity(
             sub=str(claims["sub"]),
             username=str(claims.get("preferred_username") or claims["sub"]),
