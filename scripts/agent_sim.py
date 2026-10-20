@@ -21,7 +21,7 @@ def parse_result(is_error: bool, text: str) -> ToolResult:
     # LiteLLM 會在訊息前加上 "Error: "，治理訊息本身是 JSON
     start = text.find("{")
     try:
-        body = json.loads(text[start:]) if start >= 0 else None
+        body = json.JSONDecoder().raw_decode(text[start:])[0] if start >= 0 else None
     except ValueError:
         body = None
     if isinstance(body, dict) and "governance" in body:
@@ -38,7 +38,10 @@ async def call_tool(key_alias: str, user: str, tool: str, arguments: dict[str, A
         async with ClientSession(read, write) as session:
             await session.initialize()
             names = [t.name for t in (await session.list_tools()).tools]
-            name = next(n for n in names if n.endswith(tool))
+            # LiteLLM 以 "<server>-" 為 tool 名稱加前綴
+            name = next((n for n in names if n.endswith(f"-{tool}")), None)
+            if name is None:
+                raise LookupError(f"tool {tool} not found")
             result = await session.call_tool(name, arguments)
     text = result.content[0].text if result.content else ""
     return parse_result(bool(result.isError), text)

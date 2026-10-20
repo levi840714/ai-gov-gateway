@@ -4190,7 +4190,7 @@ async def test_obo_still_reaches_upstream():
 - [ ] **Step 2: 執行並 Commit**
 
 Run: `uv run pytest -m integration -q`
-Expected: 7 passed（Postgres store 4 + 契約 3）
+Expected: 14 passed（Postgres store 10 + 契約 4）
 
 ```bash
 git add tests/integration/test_gateway_contract.py

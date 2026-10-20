@@ -1,5 +1,8 @@
 """升級 LiteLLM 前必跑：確認 plugin 掛載、hook 欄位與訊息傳遞仍成立。"""
 
+import json
+import uuid
+
 import httpx
 import pytest
 
@@ -34,4 +37,22 @@ async def test_hook_fields_reach_policy_and_message_reaches_client():
 async def test_obo_still_reaches_upstream():
     result = await call_tool("kyt-agent@1.4", "alice", "whoami", {})
     assert result.status == "allowed"
-    assert '"aud": "probe-mcp"' in result.body["text"]
+    assert json.loads(result.body["text"])["bearer_claims"]["aud"] == "probe-mcp"
+
+
+async def test_arguments_reach_policy():
+    # 只有 mcp_arguments 傳到 policy，金額才會影響結果；account_id 每次不同以免沿用審批
+    arguments = {
+        "account_id": f"contract-{uuid.uuid4().hex[:8]}",
+        "counterparty": "0x" + "2" * 40,
+        "reason": "contract",
+    }
+    large = await call_tool(
+        "kyt-agent@1.4", "alice", "freeze_account", {**arguments, "amount_usd": 25000}
+    )
+    assert large.status == "pending_approval"
+    assert large.body["reasons"] == ["amount_over_threshold"]
+    small = await call_tool(
+        "kyt-agent@1.4", "alice", "freeze_account", {**arguments, "amount_usd": 5000}
+    )
+    assert small.status == "allowed"

@@ -6,6 +6,7 @@ import subprocess
 import sys
 import time
 import uuid
+from collections.abc import Callable
 from typing import Any
 
 import httpx
@@ -34,9 +35,23 @@ def compose(*args: str) -> str:
     return done.stdout
 
 
-def restart_opa() -> None:
+def is_allowed(result: ToolResult) -> bool:
+    return result.status == "allowed"
+
+
+async def wait_for_opa(ready: Callable[[ToolResult], bool] = is_allowed) -> None:
+    # 以低風險 tool 探測，確認 OPA 已載入新資料並回應，而非固定等待
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline:
+        if ready(await call_tool("kyt-agent@1.4", "alice", "whoami", {})):
+            return
+        await asyncio.sleep(0.5)
+    raise RuntimeError("OPA did not become ready within 20s")
+
+
+async def restart_opa(ready: Callable[[ToolResult], bool] = is_allowed) -> None:
     compose("restart", "opa")
-    time.sleep(3)
+    await wait_for_opa(ready)
 
 
 def psql(query: str) -> str:
@@ -108,13 +123,14 @@ async def main() -> int:
         f"{carol_self.status_code} {carol_self.json().get('detail')}",
     )
 
-    api("POST", f"/approvals/{again.body.get('approval_id')}/approve", "bob", {})
+    approve = api("POST", f"/approvals/{again.body.get('approval_id')}/approve", "bob", {})
     changed = await freeze(26000)
     check(
         "5 核准後改參數需重新審批",
-        changed.status == "pending_approval"
+        approve.status_code == 200
+        and changed.status == "pending_approval"
         and changed.body.get("approval_id") != again.body.get("approval_id"),
-        describe(changed),
+        f"核准 {approve.status_code} → {describe(changed)}",
     )
 
     sanctioned = await freeze(10, counterparty=SANCTIONED)
@@ -144,21 +160,30 @@ async def main() -> int:
     )
 
     pending = await freeze(30000)
-    api("POST", f"/approvals/{pending.body.get('approval_id')}/approve", "bob", {})
+    pending_id = pending.body.get("approval_id")
+    pending_approve = api("POST", f"/approvals/{pending_id}/approve", "bob", {})
+    pending_detail = api("GET", f"/approvals/{pending_id}", "bob").json()
+    pending_status = pending_detail.get("approval", {}).get("status")
     original = AGENTS_FILE.read_text()
     try:
         agents = json.loads(original)
         agents["kyt-agent"]["status"] = "suspended"
         AGENTS_FILE.write_text(json.dumps(agents, indent=2) + "\n")
-        restart_opa()
+        # 停用期間 probe 也會被拒，以 agent_suspended 確認 OPA 已載入新資料
+        await restart_opa(lambda r: r.body.get("reasons") == ["agent_suspended"])
         suspended = await freeze(30000)
     finally:
         AGENTS_FILE.write_text(original)
-        restart_opa()
+        await restart_opa()
     check(
         "9 停用後核准無法兌現",
-        suspended.status == "denied" and suspended.body.get("reasons") == ["agent_suspended"],
-        describe(suspended),
+        pending.status == "pending_approval"
+        and pending_approve.status_code == 200
+        and pending_status == "approved"
+        and suspended.status == "denied"
+        and suspended.body.get("reasons") == ["agent_suspended"],
+        f"{describe(pending)} → 核准 {pending_approve.status_code} ({pending_status}) "
+        f"→ {describe(suspended)}",
     )
 
     no_role = await freeze(5000, user="bob")
@@ -173,7 +198,7 @@ async def main() -> int:
         offline = await freeze(5000)
     finally:
         compose("start", "opa")
-        time.sleep(3)
+        await wait_for_opa()
     check(
         "11 OPA 停止時拒絕",
         offline.status == "denied" and offline.body.get("reasons") == ["policy_unavailable"],
@@ -181,25 +206,28 @@ async def main() -> int:
     )
 
     rejected_id = changed.body.get("approval_id")
-    api("POST", f"/approvals/{rejected_id}/reject", "bob", {"comment": "金額有誤"})
+    reject = api("POST", f"/approvals/{rejected_id}/reject", "bob", {"comment": "金額有誤"})
     resent = await freeze(26000)
     detail = api("GET", f"/approvals/{resent.body.get('approval_id')}", "bob").json()
     history = [(a["id"], a["status"]) for a in detail.get("history", [])]
     check(
         "12 駁回後重送產生新審批",
-        resent.status == "pending_approval" and (rejected_id, "rejected") in history,
-        f"{describe(resent)} history={history}",
+        reject.status_code == 200
+        and resent.status == "pending_approval"
+        and resent.body.get("approval_id") != rejected_id
+        and (rejected_id, "rejected") in history,
+        f"駁回 {reject.status_code} → {describe(resent)} history={history}",
     )
 
     before = api("GET", "/audit/verify", "bob").json()
     last_id, reasons = psql(
         "SELECT id, reasons::text FROM audit_events ORDER BY id DESC LIMIT 1"
     ).split("|", 1)
-    psql(f"UPDATE audit_events SET reasons = '[\"tampered\"]'::jsonb WHERE id = {last_id}")
+    psql(f"UPDATE audit_events SET reasons = '[\"tampered\"]'::json WHERE id = {last_id}")
     try:
         tampered = api("GET", "/audit/verify", "bob").json()
     finally:
-        psql(f"UPDATE audit_events SET reasons = $orig${reasons}$orig$::jsonb WHERE id = {last_id}")
+        psql(f"UPDATE audit_events SET reasons = $orig${reasons}$orig$::json WHERE id = {last_id}")
     restored = api("GET", "/audit/verify", "bob").json()
     check(
         "13 稽核竄改可偵測",
