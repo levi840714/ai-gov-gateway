@@ -8,7 +8,7 @@ import psycopg
 from psycopg import sql
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 from psycopg.rows import DictRow, dict_row
-from psycopg.types.json import Jsonb
+from psycopg.types.json import Json
 
 from ai_gov_gateway.engine.audit import GENESIS_HASH, build_record
 from ai_gov_gateway.engine.models import (
@@ -30,6 +30,8 @@ from ai_gov_gateway.engine.store import (
 AUDIT_LOCK_KEY = 72_410_001
 ONE_OPEN_INDEX = "approvals_one_open"
 
+# arguments 與 reasons 用 json 而非 jsonb：jsonb 會改寫數字（1e22、-0.0），
+# 讀回後的 hash 就對不上。
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS approvals (
     id text PRIMARY KEY,
@@ -42,8 +44,8 @@ CREATE TABLE IF NOT EXISTS approvals (
     username text NOT NULL,
     server text NOT NULL,
     tool text NOT NULL,
-    arguments jsonb NOT NULL,
-    reasons jsonb NOT NULL,
+    arguments json NOT NULL,
+    reasons json NOT NULL,
     approver_role text NOT NULL,
     created_at timestamptz NOT NULL,
     expires_at timestamptz NOT NULL,
@@ -69,9 +71,9 @@ CREATE TABLE IF NOT EXISTS audit_events (
     actor_username text,
     server text,
     tool text,
-    arguments jsonb,
+    arguments json,
     decision text,
-    reasons jsonb NOT NULL,
+    reasons json NOT NULL,
     approval_id text,
     policy_version text,
     comment text,
@@ -128,7 +130,7 @@ def _db_value(column: str, value: Any) -> Any:
     if isinstance(value, StrEnum):
         return value.value
     if column in JSON_COLUMNS and value is not None:
-        return Jsonb(value)
+        return Json(value)
     return value
 
 
@@ -156,7 +158,9 @@ class PostgresStore:
             await conn.execute(SCHEMA)
 
     async def _ensure_database(self) -> None:
-        name = str(conninfo_to_dict(self._url)["dbname"])
+        name = str(conninfo_to_dict(self._url).get("dbname") or "")
+        if not name:
+            raise StoreError("database_url has no dbname")
         admin_url = make_conninfo(self._url, dbname="postgres")
         try:
             async with await psycopg.AsyncConnection.connect(admin_url, autocommit=True) as conn:
@@ -165,6 +169,8 @@ class PostgresStore:
                     await conn.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
         except psycopg.OperationalError as error:
             raise StoreUnavailable(str(error)) from error
+        except psycopg.Error as error:
+            raise StoreError(str(error)) from error
 
     @asynccontextmanager
     async def _connect(self) -> AsyncIterator[psycopg.AsyncConnection[DictRow]]:

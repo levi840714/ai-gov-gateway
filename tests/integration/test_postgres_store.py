@@ -1,3 +1,4 @@
+import asyncio
 import os
 from datetime import UTC, datetime, timedelta
 
@@ -14,7 +15,7 @@ from ai_gov_gateway.engine.models import (
     UserIdentity,
 )
 from ai_gov_gateway.engine.postgres import PostgresStore
-from ai_gov_gateway.engine.store import ApprovalConflict, StoreUnavailable
+from ai_gov_gateway.engine.store import ApprovalConflict, StoreError, StoreUnavailable
 
 pytestmark = pytest.mark.integration
 load_dotenv()
@@ -48,7 +49,8 @@ async def store() -> PostgresStore:
     store = PostgresStore(URL)
     await store.ensure_schema()
     async with await psycopg.AsyncConnection.connect(URL) as conn:
-        await conn.execute("TRUNCATE approvals, audit_events")
+        await conn.execute("DROP TABLE IF EXISTS approvals, audit_events")
+    await store.ensure_schema()
     return store
 
 
@@ -122,3 +124,74 @@ async def test_unreachable_database_raises_store_unavailable():
     store = PostgresStore("postgresql://nobody:x@127.0.0.1:1/none")
     with pytest.raises(StoreUnavailable):
         await store.audit_records()
+
+
+async def test_audit_hash_survives_json_number_edge_cases(store):
+    for args in ({"v": 1e22}, {"v": -0.0}, {"v": 1.2345e300}, {"v": "a\u0000b"}):
+        await store.append_audit(AuditEvent(event_type="decision", arguments=args), NOW)
+    records = await store.audit_records()
+    assert [r.arguments for r in records] == [
+        {"v": 1e22},
+        {"v": -0.0},
+        {"v": 1.2345e300},
+        {"v": "a\u0000b"},
+    ]
+    assert first_invalid(records) is None
+
+
+async def test_ensure_schema_rejects_url_without_dbname():
+    with pytest.raises(StoreError, match="no dbname"):
+        await PostgresStore("postgresql://nobody:x@127.0.0.1:1").ensure_schema()
+
+
+async def test_concurrent_audit_appends_keep_one_chain(store):
+    await asyncio.gather(
+        *(
+            store.append_audit(AuditEvent(event_type="decision", arguments={"n": n}), NOW)
+            for n in range(20)
+        )
+    )
+    records = await store.audit_records()
+    assert [r.id for r in records] == list(range(1, 21))
+    assert first_invalid(records) is None
+
+
+async def test_concurrent_approve_and_reject_has_one_winner(store):
+    await store.create_approval(
+        _approval("apr_1"), AuditEvent(event_type="approval_requested", approval_id="apr_1")
+    )
+    outcomes = await asyncio.gather(
+        *(
+            store.transition(
+                "apr_1",
+                from_statuses=(ApprovalStatus.PENDING,),
+                to=to,
+                at=NOW,
+                actor=BOB,
+                audit=AuditEvent(event_type=event, approval_id="apr_1"),
+            )
+            for to, event in (
+                (ApprovalStatus.APPROVED, "approval_approved"),
+                (ApprovalStatus.REJECTED, "approval_rejected"),
+            )
+        )
+    )
+    decided = [r for r in await store.audit_records() if r.event_type != "approval_requested"]
+    assert sorted(outcomes) == [False, True]
+    assert len(decided) == 1
+
+
+async def test_concurrent_creates_for_one_fingerprint_have_one_winner(store):
+    results = await asyncio.gather(
+        *(
+            store.create_approval(
+                _approval(f"apr_{n}"),
+                AuditEvent(event_type="approval_requested", approval_id=f"apr_{n}"),
+            )
+            for n in range(5)
+        ),
+        return_exceptions=True,
+    )
+    conflicts = [r for r in results if isinstance(r, ApprovalConflict)]
+    assert len(conflicts) == 4
+    assert len(await store.audit_records()) == 1
