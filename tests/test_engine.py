@@ -102,6 +102,7 @@ async def test_policy_deny_is_returned_and_audited(engine, store, policy):
         ({"token": make_token("alice", ["analyst"], expires_in=-10)}, "invalid_user_token"),
         ({"key": "kyt-agent-mcp"}, "unregistered_agent_version"),
         ({"key": None}, "unregistered_agent_version"),
+        ({"key": "kyt-agent-mcp", "token": ""}, "missing_user_token"),
     ],
 )
 async def test_rejected_before_policy(engine, store, policy, call_kwargs, reason):
@@ -109,6 +110,12 @@ async def test_rejected_before_policy(engine, store, policy, call_kwargs, reason
     assert (outcome.status, outcome.reasons) == ("denied", [reason])
     assert policy.inputs == []
     assert store.audit[0].reasons == [reason]
+
+
+@pytest.mark.parametrize("key", ["kyt-agent-mcp", None])
+async def test_unregistered_agent_is_attributed_to_delegating_user(engine, store, key):
+    await engine.decide(freeze(key=key))
+    assert (store.audit[0].username, store.audit[0].user_sub) == ("alice", "alice-sub")
 
 
 async def test_policy_unavailable_denies(engine, store, policy):

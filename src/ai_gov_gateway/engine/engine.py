@@ -76,9 +76,9 @@ class GovernanceEngine:
         agent = parse_agent_key(call.key_alias)
         user: UserIdentity | None = None
         try:
+            user = await self._verify_user(call.user_token)
             if agent is None:
                 raise _Denied("unregistered_agent_version")
-            user = await self._verify_user(call.user_token)
             decision = await self._policy.evaluate(policy_input(agent, user, call))
             if decision.decision is Decision.REQUIRE_APPROVAL:
                 return await self._require_approval(agent, user, call, decision)
