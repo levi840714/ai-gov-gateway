@@ -1,0 +1,7 @@
+{
+  "account_ops.add_to_watchlist": {"risk": "low"},
+  "account_ops.freeze_account": {"risk": "high", "amount_threshold_usd": 10000},
+  "account_ops.file_str": {"risk": "high"},
+  "probe.whoami": {"risk": "low"},
+  "probe.echo": {"risk": "low"}
+}
