@@ -36,7 +36,7 @@ services:
 
   litellm:
     # GHCR 下載在本機網路逾時，改用官方 Docker Hub 映像（同版本）
-    image: docker.io/litellm/litellm:v1.104.4
+    image: docker.io/litellm/litellm:v1.105.1
     command: ["--config", "/app/config.yaml", "--port", "4000"]
     environment:
       DATABASE_URL: postgresql://litellm:${POSTGRES_PASSWORD}@postgres:5432/litellm
