@@ -29,3 +29,10 @@ mcp_servers:
           required: [text]
           title: echoArguments
           type: object
+
+guardrails:
+  - guardrail_name: governance
+    litellm_params:
+      guardrail: governance_hook.GovernanceHook
+      mode: pre_mcp_call
+      default_on: true

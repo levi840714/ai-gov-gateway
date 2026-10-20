@@ -45,8 +45,8 @@ services:
       AI_GATEWAY_CLIENT_SECRET: ${AI_GATEWAY_CLIENT_SECRET}
       STORE_MODEL_IN_DB: "True"
     volumes:
-      - ./litellm:/app/litellm_conf:ro
       - ./litellm/config.yaml:/app/config.yaml:ro
+      - ./litellm/governance_hook.py:/app/governance_hook.py:ro
     ports:
       - "4000:4000"
     depends_on:

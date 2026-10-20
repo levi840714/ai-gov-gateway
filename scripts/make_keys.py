@@ -10,7 +10,7 @@ KEYS = {
     "kyt-agent-mcp": {
         "object_permission": {
             "mcp_servers": ["probe"],
-            "mcp_tool_permissions": {"probe": ["whoami"]},
+            "mcp_tool_permissions": {"probe": ["whoami", "echo"]},
         },
     },
 }
