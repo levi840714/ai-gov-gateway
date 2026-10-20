@@ -8,8 +8,24 @@ AI Governance Gateway（`ai-gov-gateway`）：統一治理 agent 的 LLM 流量�
 
 | 階段 | 內容 | 狀態 |
 | ---- | ---- | ---- |
-| M1 | 技術驗證：LiteLLM（LLM + MCP gateway）、Keycloak、OBO，決定 M2 架構 | 進行中 |
-| M2 | 治理服務：OPA policy、maker-checker 審批、稽核 log、高風險 tool | 未開始 |
+| M1 | 技術驗證：LiteLLM（LLM + MCP gateway）、Keycloak、OBO，決定 M2 架構 | 完成 |
+| M2 | 治理服務：以 LiteLLM hook 為執行點，OPA policy、maker-checker 審批、稽核 log、高風險 tool | 未開始 |
+
+## 目錄結構
+
+```
+ai-gov-gateway/
+├── docker-compose.yml       # litellm、postgres、keycloak、probe_mcp（image 固定版本）
+├── litellm/                 # config.yaml（模型別名、MCP server、OBO、pinned_tools）、governance_hook.py
+├── keycloak/                # realm-governance.json（測試帳號與 client）
+├── probe_mcp/               # 測試用上游 MCP server
+├── scripts/                 # 驗證腳本（token、virtual key、MCP 呼叫）
+├── tests/
+├── docs/                    # specs/、plans/、spikes/
+└── var/                     # 執行產物，含 keys.json（不進版控）
+```
+
+LiteLLM 固定在 v1.105.1：tool 定義鎖定從此版起才有；`governance_hook.py` 依賴 `CustomGuardrail` 介面與 `mcp_*` 欄位，升級前須重跑 V7。
 
 ## 工具鏈
 
@@ -25,7 +41,7 @@ AI Governance Gateway（`ai-gov-gateway`）：統一治理 agent 的 LLM 流量�
 uv sync
 docker compose up -d
 uv run pytest
-uv run ruff format src tests && uv run ruff check src tests && uv run mypy src
+uv run ruff format . && uv run ruff check .
 ```
 
 ## 程式碼規範
