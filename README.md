@@ -8,7 +8,7 @@
 | 階段 | 內容 | 狀態 |
 | ---- | ---- | ---- |
 | M1 | 技術驗證：LiteLLM（LLM + MCP gateway）、Keycloak、OBO | 完成，結果見 [m1-findings.md](docs/spikes/m1-findings.md) |
-| M2 | 治理服務：OPA policy、agent 版本 key、maker-checker 審批、hash chain 稽核 | 完成：端到端 13/13、單元測試 141、整合測試 14、Rego 測試 33 |
+| M2 | 治理服務：OPA policy、agent 版本 key、maker-checker 審批、hash chain 稽核 | 完成：端到端 13/13、單元測試 165、整合測試 16、Rego 測試 33 |
 | M3 | kyt_agent 接入高風險 tool | 未開始 |
 
 ## 架構
