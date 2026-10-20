@@ -4,7 +4,13 @@ import pytest
 
 from ai_gov_gateway.engine.approvals import ApprovalError, ApprovalService
 from ai_gov_gateway.engine.engine import GovernanceEngine
-from ai_gov_gateway.engine.models import ApprovalStatus, Decision, ToolCall, UserIdentity
+from ai_gov_gateway.engine.models import (
+    ApprovalStatus,
+    Decision,
+    PolicyDecision,
+    ToolCall,
+    UserIdentity,
+)
 from tests.fakes import FakeClock, FakePolicy, InMemoryStore, id_sequence, policy_result
 from tests.jwt_helpers import alice_token, make_verifier
 
@@ -132,3 +138,41 @@ async def test_verify_audit(service, store, pending):
     assert (result.records, result.first_invalid_id) == (1, None)
     store.audit[0] = store.audit[0].model_copy(update={"username": "mallory"})
     assert (await service.verify_audit(BOB)).first_invalid_id == 1
+
+
+async def test_list_expired_includes_due_approvals_not_yet_marked(service, clock, pending):
+    approval_id = await pending()
+    clock.advance(hours=25)
+    expired = await service.list(BOB, ApprovalStatus.EXPIRED)
+    assert [(a.id, a.status) for a in expired] == [(approval_id, ApprovalStatus.EXPIRED)]
+
+
+async def test_approval_requires_its_own_approver_role(service, store, clock):
+    engine = GovernanceEngine(
+        verifier=make_verifier(),
+        policy=FakePolicy(
+            PolicyDecision(
+                decision=Decision.REQUIRE_APPROVAL,
+                reasons=["amount_over_threshold"],
+                policy_version="test-1",
+                approver_role="other_role",
+            )
+        ),
+        store=store,
+        approval_ttl=timedelta(hours=24),
+        approver_role="compliance_supervisor",
+        clock=clock,
+        new_id=id_sequence(),
+    )
+    call = ToolCall(
+        key_alias="kyt-agent@1.4",
+        user_token=alice_token(),
+        server="account_ops",
+        tool="freeze_account",
+        arguments={"account_id": "acct-001"},
+    )
+    outcome = await engine.decide(call)
+    assert outcome.approval_id is not None
+    with pytest.raises(ApprovalError) as error:
+        await service.approve(BOB, outcome.approval_id, "")
+    assert (error.value.status_code, error.value.code) == (403, "role_required")

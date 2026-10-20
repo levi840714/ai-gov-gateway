@@ -40,7 +40,9 @@ class ApprovalService:
 
     async def list(self, actor: UserIdentity, status: ApprovalStatus | None) -> list[Approval]:
         self._require_role(actor)
-        refreshed = [await self._expire_if_due(a) for a in await self._store.list_approvals(status)]
+        # 逾期但尚未落帳的審批仍存為 pending/approved，查 expired 時要連同取回再刷新
+        fetch = None if status is ApprovalStatus.EXPIRED else status
+        refreshed = [await self._expire_if_due(a) for a in await self._store.list_approvals(fetch)]
         return [a for a in refreshed if status is None or a.status is status]
 
     async def get(self, actor: UserIdentity, approval_id: str) -> ApprovalDetail:
@@ -67,6 +69,8 @@ class ApprovalService:
     ) -> Approval:
         self._require_role(actor)
         approval = await self._load(approval_id)
+        if approval.approver_role not in actor.roles:
+            raise ApprovalError(403, "role_required")
         if approval.status is ApprovalStatus.EXPIRED:
             raise ApprovalError(409, "approval_expired")
         if approval.status is not ApprovalStatus.PENDING:
