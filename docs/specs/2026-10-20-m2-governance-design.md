@@ -313,3 +313,21 @@ M1 腳本的回歸：
 | hook 的 raise 訊息格式在不同 client 呈現不同 | 以 MCP Python SDK client 驗證；訊息為純 JSON 字串，不依賴例外型別 |
 | device flow 無法在自動化測試中執行 | 自動化測試沿用 password grant 測試帳號，device flow 以手動驗證 |
 | 多 worker 同時寫入稽核 | advisory lock 序列化；整合測試以並行請求驗證 chain 完整 |
+
+## 11. 撰寫實作計畫時的修正（2026-10-20）
+
+計畫前實測後，以下細節與上文不同，以本節為準：
+
+| 項目 | 上文 | 修正 | 理由 |
+| ---- | ---- | ---- | ---- |
+| 啟動方式 | 自訂 uvicorn 進入點 `app.py` | 保留 `litellm --config` 啟動；LiteLLM 依 guardrail 設定載入 `ai_gov_gateway.plugin` 時，該模組把 `/governance` router 掛到 app | LiteLLM CLI 在啟動前會做 Prisma migration 與環境設定，自訂進入點會略過 |
+| 映像 | `uv pip install` 套件 | 複製 `src/ai_gov_gateway` 並設定 `PYTHONPATH` | 映像內沒有 pip 與 uv；執行期相依已在 LiteLLM 的 venv |
+| `mcp` 相依 | 未說明 | 只放在 `scripts` 依賴群組（`mcp<2`），不列入套件相依 | LiteLLM venv 內是 mcp 2.2.0 |
+| Policy 資料位置 | `policies/data/agents.json` 等 | `policies/agents/data.json`、`policies/tools/data.json`、`policies/sanctions/data.json`、`policies/meta/data.json` | OPA 以 `<dir>/data.json` 對應 `data.<dir>` |
+| 規則 | 規則 1–10 | 另加 `amount_missing`、`counterparty_missing`（凍結參數缺漏時送審）與 `high_risk_unreviewed_tool`（新增的高風險 tool 未寫規則時送審） | 參數缺漏時 Rego 的 `not` 會得到 undefined 而 fail-open；新 tool 預設送審 |
+| 稽核欄位 | §7 | 新增 `comment` | 核准與駁回的意見需可追溯 |
+| 稽核驗證 | `agw audit verify` 直接讀資料庫 | 經 `GET /governance/audit/verify`（`compliance_supervisor`） | CLI 不需資料庫憑證 |
+| 寫入一致性 | 未說明 | 審批狀態變更與對應的稽核事件在同一個 transaction 寫入 | 避免「狀態變了但沒有稽核」 |
+| account_ops 的 tool 鎖定 | 未說明 | M2 不設定 | 不在 M2 驗收情境中 |
+| Postgres port | 未對外 | 開 `127.0.0.1:5433` | 主機上的整合測試需要連線 |
+| 情境 4 | alice 自己核准 | 新增測試帳號 carol（analyst + compliance_supervisor），由 carol 委託後自己核准 | alice 沒有主管角色，只會得到 `role_required`，測不到 maker-checker |
