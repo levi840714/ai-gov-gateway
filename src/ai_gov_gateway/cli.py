@@ -13,6 +13,7 @@ from ai_gov_gateway.cli_auth import (
     save_token,
     start_device_flow,
 )
+from ai_gov_gateway.engine.models import ApprovalStatus
 
 
 class CliSettings(BaseSettings):
@@ -40,6 +41,11 @@ def _fail(message: str) -> typer.Exit:
     return typer.Exit(1)
 
 
+def _unreachable(url: str, error: httpx.HTTPError) -> str:
+    # 只印例外類別名稱：str(error) 可能含 URL 或標頭內容
+    return f"無法連線到 {url}：{type(error).__name__}"
+
+
 @app.command()
 def login() -> None:
     """以 Keycloak device flow 登入。"""
@@ -52,6 +58,8 @@ def login() -> None:
             token = poll_token(http, settings.oidc_issuer, settings.client_id, code)
         except LoginError as error:
             raise _fail(f"登入失敗：{error.code}") from error
+        except httpx.HTTPError as error:
+            raise _fail(_unreachable(settings.oidc_issuer, error)) from error
     save_token(settings.token_path, token)
     typer.echo("已登入")
 
@@ -68,23 +76,35 @@ def _request(
         token = load_token(settings.token_path)
     except LoginError as error:
         raise _fail("尚未登入，請先執行 agw login") from error
-    with make_client() as http:
-        response = http.request(
-            method,
-            f"{settings.gateway_url}/governance{path}",
-            headers={"Authorization": f"Bearer {token}"},
-            json=body,
-            params=params,
-        )
+    try:
+        with make_client() as http:
+            response = http.request(
+                method,
+                f"{settings.gateway_url}/governance{path}",
+                headers={"Authorization": f"Bearer {token}"},
+                json=body,
+                params=params,
+            )
+    except httpx.HTTPError as error:
+        raise _fail(_unreachable(settings.gateway_url, error)) from error
     if response.status_code == 401:
         raise _fail("token 無效或已過期，請重新執行 agw login")
     if response.status_code >= 400:
-        try:
-            detail = response.json().get("detail", response.text)
-        except ValueError:
-            detail = response.text
-        raise _fail(f"失敗（{response.status_code}）：{detail}")
-    return response.json()
+        raise _fail(f"失敗（{response.status_code}）：{_error_detail(response)}")
+    try:
+        return response.json()
+    except ValueError as error:
+        raise _fail("閘道回應格式不正確") from error
+
+
+def _error_detail(response: httpx.Response) -> str:
+    try:
+        body = response.json()
+    except ValueError:
+        return response.text
+    detail = body.get("detail", response.text) if isinstance(body, dict) else response.text
+    # FastAPI 的 422 detail 是 list
+    return detail if isinstance(detail, str) else json.dumps(detail, ensure_ascii=False)
 
 
 def _line(row: dict[str, Any]) -> str:
@@ -97,11 +117,11 @@ def _line(row: dict[str, Any]) -> str:
 @approvals_app.command("list")
 def list_approvals(
     status: Annotated[
-        str, typer.Option(help="pending、approved、rejected、expired、used")
-    ] = "pending",
+        ApprovalStatus, typer.Option(help="pending、approved、rejected、expired、used")
+    ] = ApprovalStatus.PENDING,
     show_all: Annotated[bool, typer.Option("--all", help="列出所有狀態")] = False,
 ) -> None:
-    rows = _request("GET", "/approvals", params=None if show_all else {"status": status})
+    rows = _request("GET", "/approvals", params=None if show_all else {"status": status.value})
     if not rows:
         typer.echo("沒有符合的審批")
     for row in rows:

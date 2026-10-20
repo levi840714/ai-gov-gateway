@@ -58,6 +58,14 @@ def test_poll_waits_until_authorized():
     assert sleeps == [5, 10]
 
 
+def test_poll_gives_up_after_device_code_expires():
+    ticks = iter([0.0, 100.0, 700.0])
+    http = _http([httpx.Response(400, json={"error": "authorization_pending"})] * 3)
+    with pytest.raises(LoginError) as error:
+        poll_token(http, ISSUER, "agw-cli", CODE, sleep=lambda s: None, now=lambda: next(ticks))
+    assert error.value.code == "expired_token"
+
+
 def test_poll_stops_on_denied():
     http = _http([httpx.Response(400, json={"error": "access_denied"})])
     with pytest.raises(LoginError) as error:
@@ -77,3 +85,24 @@ def test_missing_token_file(tmp_path):
     with pytest.raises(LoginError) as error:
         load_token(tmp_path / "none.json")
     assert error.value.code == "not_logged_in"
+
+
+@pytest.mark.parametrize("content", ["[]", "{}", '{"access_token": null}', '{"access_token": ""}'])
+def test_malformed_token_file(tmp_path, content):
+    path = tmp_path / "token.json"
+    path.write_text(content)
+    with pytest.raises(LoginError) as error:
+        load_token(path)
+    assert error.value.code == "not_logged_in"
+
+
+def test_token_path_that_is_a_directory(tmp_path):
+    with pytest.raises(LoginError) as error:
+        load_token(tmp_path)
+    assert error.value.code == "not_logged_in"
+
+
+def test_token_directory_is_private(tmp_path):
+    path = tmp_path / "nested" / "token.json"
+    save_token(path, "tok")
+    assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700

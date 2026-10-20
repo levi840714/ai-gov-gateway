@@ -50,10 +50,14 @@ def poll_token(
     client_id: str,
     code: DeviceCode,
     sleep: Callable[[float], None] = time.sleep,
+    now: Callable[[], float] = time.monotonic,
 ) -> str:
-    """依 RFC 8628 輪詢；Keycloak 在逾時後回 expired_token，所以迴圈一定會結束。"""
+    """依 RFC 8628 輪詢；超過 device code 的有效期限即結束，不依賴伺服器回 expired_token。"""
     interval = code.interval
+    deadline = now() + code.expires_in
     while True:
+        if now() >= deadline:
+            raise LoginError("expired_token")
         response = http.post(
             f"{issuer}/protocol/openid-connect/token",
             data={
@@ -73,7 +77,7 @@ def poll_token(
 
 
 def save_token(path: Path, token: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     path.touch(mode=0o600, exist_ok=True)
     path.chmod(0o600)
     path.write_text(json.dumps({"access_token": token}))
@@ -81,6 +85,9 @@ def save_token(path: Path, token: str) -> None:
 
 def load_token(path: Path) -> str:
     try:
-        return str(json.loads(path.read_text())["access_token"])
-    except (FileNotFoundError, KeyError, ValueError) as error:
+        token = json.loads(path.read_text())["access_token"]
+    except (OSError, KeyError, TypeError, ValueError) as error:
         raise LoginError("not_logged_in") from error
+    if not isinstance(token, str) or not token:
+        raise LoginError("not_logged_in")
+    return token
