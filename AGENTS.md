@@ -21,7 +21,7 @@ ai-gov-gateway/
 ├── src/ai_gov_gateway/
 │   ├── engine/              # 治理引擎：models、fingerprint、tokens、policy、store、postgres、audit、engine、approvals
 │   ├── api/                 # /governance 路由（審批、稽核驗證）
-│   ├── plugin.py            # LiteLLM guardrail；載入時掛上 /governance 路由與 MCP header 檢查（只在 gateway 映像內 import）
+│   ├── plugin.py            # LiteLLM guardrail；載入時掛上 /governance 路由與 Authorization header 檢查（只在 gateway 映像內 import）
 │   ├── hook_adapter.py      # LiteLLM hook 的 data → ToolCall
 │   ├── runtime.py           # 由 Settings 組出 Services（lazy 單例）
 │   ├── config.py            # GOV_ 前綴的設定
@@ -37,8 +37,8 @@ ai-gov-gateway/
 └── var/                     # 執行產物，含 keys.json（不進版控）
 ```
 
-LiteLLM 固定在 v1.105.1：tool 定義鎖定從此版起才有；`plugin.py` 依賴 `CustomGuardrail` 介面、`litellm.proxy.proxy_server.app`（含已建好的 `middleware_stack`）、hook 的 `mcp_*` 欄位與 MCP 路由前綴。
-**升級 LiteLLM 前必須跑 `uv run pytest -m integration`**（含 gateway 契約測試），結果須為 15 passed 而非 skipped。
+LiteLLM 固定在 v1.105.1：tool 定義鎖定從此版起才有；`plugin.py` 依賴 `CustomGuardrail` 介面、`litellm.proxy.proxy_server.app`（含已建好的 `middleware_stack`）與 hook 的 `mcp_*` 欄位。
+**升級 LiteLLM 前必須跑 `uv run pytest -m integration`**（含 gateway 契約測試），結果須為 16 passed 而非 skipped。
 
 `engine/` 不 import LiteLLM、FastAPI 與 `config`；依賴方向為 `plugin` / `api` → `runtime` → `engine` / `config`，`runtime` 負責把設定注入引擎。
 

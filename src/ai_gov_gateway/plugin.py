@@ -14,27 +14,24 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from ai_gov_gateway.api.approvals import router
 from ai_gov_gateway.engine.models import Outcome
 from ai_gov_gateway.engine.store import StoreUnavailable
-from ai_gov_gateway.hook_adapter import (
-    has_ambiguous_authorization,
-    is_mcp_path,
-    tool_call_from_hook,
-)
+from ai_gov_gateway.hook_adapter import has_ambiguous_authorization, tool_call_from_hook
 from ai_gov_gateway.runtime import get_services
 
 logger = logging.getLogger(__name__)
 
 
 class AuthorizationHeaderGuard:
-    """在 LiteLLM 處理 MCP 請求前拒絕 Authorization-* header，見 has_ambiguous_authorization。"""
+    """在 LiteLLM 路由前拒絕 Authorization-* header，見 has_ambiguous_authorization。
+
+    Responses、chat completions、Anthropic messages 也會執行 MCP tool，因此套用到所有路由。
+    """
 
     def __init__(self, app: ASGIApp) -> None:
         self._app = app
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if (
-            scope["type"] == "http"
-            and is_mcp_path(scope["path"])
-            and has_ambiguous_authorization(name.decode("latin-1") for name, _ in scope["headers"])
+        if scope["type"] == "http" and has_ambiguous_authorization(
+            name.decode("latin-1") for name, _ in scope["headers"]
         ):
             response = JSONResponse({"detail": "ambiguous_authorization_headers"}, status_code=400)
             await response(scope, receive, send)

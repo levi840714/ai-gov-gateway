@@ -7,7 +7,7 @@ import httpx
 import pytest
 
 from scripts.agent_sim import call_tool
-from scripts.env import KEYS_FILE, LITELLM_URL
+from scripts.env import KEYS_FILE, LITELLM_URL, env
 from scripts.kc import user_token
 
 pytestmark = pytest.mark.integration
@@ -85,3 +85,14 @@ def test_second_authorization_header_is_rejected():
     assert rejected.status_code == 400
     assert rejected.json() == {"detail": "ambiguous_authorization_headers"}
     assert _initialize({}).status_code == 200
+
+
+def test_second_authorization_header_is_rejected_on_llm_routes():
+    # LLM 端點也會以 litellm_proxy 執行 MCP tool，檢查不能只限 MCP 路由
+    headers = {"Authorization": f"Bearer {env('LITELLM_MASTER_KEY')}"}
+    rejected = httpx.get(
+        f"{LITELLM_URL}/v1/models", headers=headers | {"Authorization-Obo": "Bearer x"}
+    )
+    assert rejected.status_code == 400
+    assert rejected.json() == {"detail": "ambiguous_authorization_headers"}
+    assert httpx.get(f"{LITELLM_URL}/v1/models", headers=headers).status_code == 200

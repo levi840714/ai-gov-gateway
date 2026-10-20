@@ -1,10 +1,6 @@
 import pytest
 
-from ai_gov_gateway.hook_adapter import (
-    has_ambiguous_authorization,
-    is_mcp_path,
-    tool_call_from_hook,
-)
+from ai_gov_gateway.hook_adapter import has_ambiguous_authorization, tool_call_from_hook
 
 # LiteLLM v1.105.1 call_mcp_tool 的 data 欄位（M1 V7 實際觀察）
 M1_DATA = {
@@ -64,26 +60,3 @@ def test_authorization_prefixed_headers_are_ambiguous(names):
 )
 def test_exact_authorization_is_not_ambiguous(names):
     assert not has_ambiguous_authorization(names)
-
-
-@pytest.mark.parametrize(
-    "path",
-    [
-        "/mcp",
-        "/mcp/",
-        "/mcp/proxy",
-        "/mcp/account_ops/mcp",
-        "/mcp-rest/tools/call",
-        "/v1/mcp/server",
-        "/toolset/ops/mcp",
-        "/account_ops/mcp",
-        "/account_ops/mcp/",
-    ],
-)
-def test_litellm_mcp_routes_are_mcp_paths(path):
-    assert is_mcp_path(path)
-
-
-@pytest.mark.parametrize("path", ["/governance/approvals", "/v1/chat/completions", "/health"])
-def test_other_routes_are_not_mcp_paths(path):
-    assert not is_mcp_path(path)
