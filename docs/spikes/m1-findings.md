@@ -4,9 +4,9 @@
 
 | # | 項目 | 結論 |
 | - | ---- | ---- |
-| V1 | kyt_agent LLM 流量經 LiteLLM | 待驗證：Gemini 預付額度用盡（402） |
-| V2 | 別名下的成本估算 | 程式已完成（`LLM_PRICE_MODEL`），實測待 V1 |
-| V3 | virtual key 預算與 rpm | 待驗證：同 V1 |
+| V1 | kyt_agent LLM 流量經 LiteLLM | 通過 |
+| V2 | 別名下的成本估算 | 通過：kyt 估算與 LiteLLM spend 完全一致 |
+| V3 | virtual key 預算與 rpm | 通過（預算為事前檢查，單次請求可能超支） |
 | V4 | 開源版 OBO | 通過 |
 | V5 | token exchange 保留 agent 身份 | 部分通過：Keycloak 做得到，但條件過多，不採用 |
 | V6 | 上游可見的身份資訊 | 通過（結論：上游只看得到使用者，看不到 agent） |
@@ -15,19 +15,64 @@
 
 ## V1–V3：LLM gateway
 
-LiteLLM 能正確把 `kyt-main` 別名轉送到 Gemini，但 Gemini 回傳：
+第一次執行時 Gemini 回傳 `402 Your prepayment credits are depleted`：Google 自 2026-03-23 起改為預付制，餘額歸零時帳單帳戶下所有 API key 同時停用，與 monthly spend cap 是兩套獨立的限制。儲值後重跑。
 
-```
-GeminiException - "code": 402, "Your prepayment credits are depleted." (RESOURCE_EXHAUSTED)
-```
-
-proxy 本身運作正常，額度補足後依計畫 Task 9 執行。
-
-kyt_agent 已完成的改動（分支 `feat/llm-proxy`）：
+kyt_agent 的改動（分支 `feat/llm-proxy`）：
 - `LLM_BASE_URL`、`LLM_API_KEY` 兩者皆有值時，以 OpenAI 相容端點建立模型；只填一個時維持直連
 - `LLM_PRICE_MODEL`：模型為 proxy 別名時，eval 成本估算改用指定模型的價格
 - `kyt eval --limit N`
 - 測試 301 個全部通過，mypy、ruff 無錯誤
+
+### V1：kyt eval 經 LiteLLM
+
+```bash
+LLM_BASE_URL=http://localhost:4000 LLM_API_KEY=<kyt-agent virtual key> \
+  LLM_PRICE_MODEL=google_genai:gemini-3.8-flash CHAIN_MODE=replay \
+  uv run kyt eval --model openai:kyt-main --limit 3
+```
+
+結果檔 `kyt_agent/var/eval/20261020-091937-openai_kyt-main.json`，對照直連的 `kyt_agent/var/eval/20261015-165159-google_genai_gemini-3.8-flash.json`：
+
+| 地址 | 經 LiteLLM：等級 / 工具 / input / output | 直連：等級 / 工具 / input / output |
+| ---- | ---------------------------------------- | ---------------------------------- |
+| 0xd5af44dd… | HIGH / 8 / 19,739 / 3,358 | HIGH / 7 / 32,612 / 4,661 |
+| 0x6aae3e74… | HIGH / 6 / 21,504 / 2,805 | HIGH / 8 / 35,716 / 3,924 |
+| 0x01959602… | HIGH / 7 / 29,056 / 2,819 | HIGH / 8 / 24,760 / 4,101 |
+
+- 3 筆決策與風險等級和直連一致，0 錯誤
+- Gemini 3 的多輪 tool calling 經 OpenAI 相容格式正常運作
+- audit log 的 `llm_call` 事件有 `input_tokens`、`output_tokens`、`cache_read_tokens`
+- token 數差異在單次執行的變動範圍內（直連的 `--repeat` 結果本來就有類似落差），只有 3 筆無法判斷是否有系統性差異
+- 兩邊的 input 快取命中率都是 0%
+
+### V2：成本估算
+
+| 來源 | 金額 |
+| ---- | ---- |
+| kyt 估算（`LLM_PRICE_MODEL=google_genai:gemini-3.8-flash`） | $0.08640675 |
+| LiteLLM `key/info` 的 `spend`（key `kyt-agent`） | $0.08640675 |
+
+兩者完全一致。LiteLLM 內建價格表已有 `gemini/gemini-3.8-flash`（input $0.75 / output $3.75 每百萬 token）。未設定 `LLM_PRICE_MODEL` 時估算成本顯示 `-`（單元測試涵蓋）。
+
+### V3：virtual key 的 rpm 與預算
+
+rpm（key `rate-probe`，`rpm_limit: 2`，`scripts/rate_limit_check.py`）：
+
+```
+1 200
+2 200
+3 429 Rate limit exceeded for api_key: … Limit type: requests. Current limit: 2
+```
+
+預算（key `budget-probe`，`max_budget: 0.000001`）：
+
+```
+1 200
+2 422 Budget has been exceeded! Key=budget-probe (sk-...ZXcQ) Current cost: 9e-06, Max budget: 1e-06
+3 422 （同上）
+```
+
+預算在呼叫**前**檢查：第一次請求放行並超支，之後才被擋。M2 若以預算作為硬性上限，需預留單次請求的最大成本。
 
 ## V4：開源版 OBO
 
