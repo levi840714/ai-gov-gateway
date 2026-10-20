@@ -1,0 +1,22 @@
+services:
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.8.1
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
+      KC_HOSTNAME: http://localhost:8080
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
+    volumes:
+      - ./keycloak:/opt/keycloak/data/import:ro
+    ports:
+      - "8080:8080"
+
+  probe_mcp:
+    build:
+      context: .
+      dockerfile: probe_mcp/Dockerfile
+    environment:
+      PROBE_WHOAMI_DESCRIPTION: ${PROBE_WHOAMI_DESCRIPTION:-Return the headers and bearer token claims this server received.}
+    ports:
+      - "8100:8100"
