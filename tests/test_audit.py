@@ -1,5 +1,7 @@
 from datetime import UTC, datetime, timedelta, timezone
 
+import pytest
+
 from ai_gov_gateway.engine.audit import (
     GENESIS_HASH,
     approval_event,
@@ -81,3 +83,15 @@ def test_approval_event_copies_approval_fields():
     assert event.approval_id == "apr_1"
     assert event.comment == "ok"
     assert event.arguments == {"amount_usd": 25000}
+
+
+def test_record_hash_golden_vector():
+    event = AuditEvent(event_type="decision", tool="t", reasons=["r"], arguments={"n": 1})
+    assert record_hash(GENESIS_HASH, datetime(2026, 1, 1, tzinfo=UTC), event) == (
+        "befddbd42dbfb017825863da461eb480640e4ccbdb10f5b783bbd751950d261e"
+    )
+
+
+def test_naive_timestamp_is_rejected():
+    with pytest.raises(ValueError, match="timezone-aware"):
+        record_hash(GENESIS_HASH, datetime(2026, 1, 1), _event(1))

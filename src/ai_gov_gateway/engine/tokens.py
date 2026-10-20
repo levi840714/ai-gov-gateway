@@ -30,12 +30,19 @@ class TokenVerifier:
             )
         except jwt.PyJWTError as error:
             raise TokenError(type(error).__name__) from error
-        realm_access = claims.get("realm_access") or {}
         return UserIdentity(
             sub=str(claims["sub"]),
             username=str(claims.get("preferred_username") or claims["sub"]),
-            roles=[str(role) for role in realm_access.get("roles", [])],
+            roles=_roles_of(claims),
         )
+
+
+def _roles_of(claims: dict[str, Any]) -> list[str]:
+    realm_access = claims.get("realm_access", {})
+    roles = realm_access.get("roles", []) if isinstance(realm_access, dict) else None
+    if not isinstance(roles, list) or not all(isinstance(role, str) for role in roles):
+        raise TokenError("InvalidRealmAccess")
+    return roles
 
 
 def jwks_resolver(jwks_url: str) -> KeyResolver:

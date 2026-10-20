@@ -10,6 +10,7 @@ ISSUER = "http://localhost:8080/realms/governance"
 AUDIENCE = "ai-gateway"
 _SIGNING_KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
 _FOREIGN_KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+_UNSET: Any = object()
 
 
 def make_token(
@@ -20,6 +21,7 @@ def make_token(
     issuer: str = ISSUER,
     expires_in: int = 300,
     foreign: bool = False,
+    realm_access: Any = _UNSET,
 ) -> str:
     now = datetime.now(UTC)
     payload: dict[str, Any] = {
@@ -27,10 +29,12 @@ def make_token(
         "aud": audience,
         "sub": f"{username}-sub",
         "preferred_username": username,
-        "realm_access": {"roles": roles},
+        "realm_access": {"roles": roles} if realm_access is _UNSET else realm_access,
         "iat": now,
         "exp": now + timedelta(seconds=expires_in),
     }
+    if realm_access is None:
+        del payload["realm_access"]
     key = _FOREIGN_KEY if foreign else _SIGNING_KEY
     return jwt.encode(payload, key, algorithm="RS256")
 

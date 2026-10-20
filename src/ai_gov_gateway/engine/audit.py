@@ -14,11 +14,14 @@ GENESIS_HASH = "0" * 64
 
 
 def record_hash(prev_hash: str, ts: datetime, event: AuditEvent) -> str:
-    # 資料庫讀回的時間可能帶不同時區，統一換成 UTC 再算
+    if ts.tzinfo is None:
+        raise ValueError("audit timestamps must be timezone-aware")
+    # 資料庫讀回的時間可能帶不同時區，統一換成 UTC 再算；
+    # 排除 None，之後新增的選填欄位才不會改變既有紀錄的 hash
     body = {
         "prev_hash": prev_hash,
         "ts": ts.astimezone(UTC).isoformat(),
-        "event": event.model_dump(mode="json"),
+        "event": event.model_dump(mode="json", exclude_none=True),
     }
     return sha256_hex(canonical_json(body))
 
