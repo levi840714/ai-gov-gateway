@@ -17,6 +17,8 @@ package = false
 
 [tool.ruff]
 line-length = 100
+# docs 內的程式碼片段刻意保留縮排，不交給 ruff 格式化
+extend-exclude = ["docs"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]

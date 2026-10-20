@@ -20,6 +20,10 @@ class GovernanceHook(CustomGuardrail):
             f"has_user_token={bool(data.get('incoming_bearer_token'))}",
             flush=True,
         )
-        if call_type == "call_mcp_tool" and tool == "echo" and "freeze" in str(arguments.get("text")):
+        if (
+            call_type == "call_mcp_tool"
+            and tool == "echo"
+            and "freeze" in str(arguments.get("text"))
+        ):
             raise ValueError("pending_approval: approval_id=demo-123")
         return data
