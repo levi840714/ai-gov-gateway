@@ -1,0 +1,9 @@
+model_list:
+  - model_name: kyt-main
+    litellm_params:
+      model: gemini/gemini-3.8-flash
+      api_key: os.environ/GOOGLE_API_KEY
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  database_url: os.environ/DATABASE_URL

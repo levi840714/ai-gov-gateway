@@ -20,3 +20,38 @@ services:
       PROBE_WHOAMI_DESCRIPTION: ${PROBE_WHOAMI_DESCRIPTION:-Return the headers and bearer token claims this server received.}
     ports:
       - "8100:8100"
+
+  postgres:
+    image: postgres:17.6
+    environment:
+      POSTGRES_USER: litellm
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: litellm
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U litellm"]
+      interval: 5s
+      retries: 10
+
+  litellm:
+    # GHCR 下載在本機網路逾時，改用官方 Docker Hub 映像（同版本）
+    image: docker.io/litellm/litellm:v1.104.4
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    environment:
+      DATABASE_URL: postgresql://litellm:${POSTGRES_PASSWORD}@postgres:5432/litellm
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY}
+      AI_GATEWAY_CLIENT_SECRET: ${AI_GATEWAY_CLIENT_SECRET}
+      STORE_MODEL_IN_DB: "True"
+    volumes:
+      - ./litellm:/app/litellm_conf:ro
+      - ./litellm/config.yaml:/app/config.yaml:ro
+    ports:
+      - "4000:4000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  pgdata:
