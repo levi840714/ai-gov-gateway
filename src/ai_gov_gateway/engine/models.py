@@ -36,7 +36,7 @@ class ToolCall(BaseModel):
     """hook 從 LiteLLM 取得的一次 tool 呼叫。"""
 
     key_alias: str | None
-    user_token: str | None
+    user_token: str | None = Field(default=None, repr=False)
     server: str
     tool: str
     arguments: dict[str, Any] = Field(default_factory=dict)

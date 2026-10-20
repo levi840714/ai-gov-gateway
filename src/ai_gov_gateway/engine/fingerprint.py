@@ -6,7 +6,9 @@ from ai_gov_gateway.engine.models import AgentRef
 
 
 def canonical_json(value: Any) -> str:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str)
+    return json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
+    )
 
 
 def sha256_hex(text: str) -> str:
