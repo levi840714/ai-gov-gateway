@@ -29,6 +29,8 @@ services:
       POSTGRES_USER: litellm
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: litellm
+    ports:
+      - "127.0.0.1:55433:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
