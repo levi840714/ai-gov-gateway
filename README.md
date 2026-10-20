@@ -67,8 +67,8 @@ M1 的主要結論：
 | `gateway` | 4000 | LiteLLM v1.105.1 加上治理套件：LLM 與 MCP gateway、`/governance` 路由 |
 | `postgres` | `127.0.0.1:55433` | 資料庫 `litellm`（virtual key 與用量）、`governance`（審批與稽核，gateway 首次使用時建立） |
 | `keycloak` | 8080 | IdP，realm `governance`（啟動時匯入 `keycloak/realm-governance.json`） |
-| `opa` | 不對外 | OPA 1.21.1，`--watch` 載入 `policies/` |
-| `account_ops` | 不對外 | 模擬下游 MCP server：`add_to_watchlist`、`freeze_account`、`file_str` |
+| `opa` | 不對外（`governed` 內部網路） | OPA 1.21.1，`--watch` 載入 `policies/` |
+| `account_ops` | 不對外（`governed` 內部網路） | 模擬下游 MCP server：`add_to_watchlist`、`freeze_account`、`file_str` |
 | `probe_mcp` | `127.0.0.1:8100` | 測試用上游 MCP server，回傳收到的 header 與 token claims |
 
 ## 啟動
@@ -178,7 +178,7 @@ uv run mypy src
 
 - 只記錄決策，不記錄下游執行結果；核准在放行當下標記為 used，下游失敗需重新申請
 - `list_mcp_tools` 不經治理；未註冊版本的 key 仍可能看到 tool，但呼叫時會被拒絕
-- OPA 的 REST API 在 compose 內部網路中未設驗證
+- OPA 與 account_ops 本身不驗證呼叫者，靠 `governed` 內部網路（`internal: true`，只有 gateway 加入）隔離
 - LiteLLM 會把每次治理拒絕以 ERROR 等級連同 traceback 記錄
 - JWKS 無法取得時回報為 `invalid_user_token`，與 token 本身無效無法區分
 - policy 資料錯誤（未知的 risk 值、缺少 status）沿用 `risk_exceeds_agent_limit`、`agent_suspended` 原因代碼

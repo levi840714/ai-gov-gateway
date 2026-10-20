@@ -42,10 +42,13 @@ services:
     build:
       context: .
       dockerfile: account_ops/Dockerfile
+    # 本身不驗證呼叫者，只放在 gateway 才能進入的內部網路
+    networks: [governed]
 
   opa:
     image: docker.io/openpolicyagent/opa:1.21.1
     # 不對外開 port：只有 gateway 能透過內部網路查詢
+    networks: [governed]
     command: ["run", "--server", "--addr", "0.0.0.0:8181", "--watch", "--log-level", "error", "/policies"]
     volumes:
       - ./policies:/policies:ro
@@ -67,6 +70,7 @@ services:
       - ./litellm/config.yaml:/app/config.yaml:ro
     ports:
       - "4000:4000"
+    networks: [default, governed]
     depends_on:
       postgres:
         condition: service_healthy
@@ -74,6 +78,10 @@ services:
         condition: service_started
       keycloak:
         condition: service_started
+
+networks:
+  governed:
+    internal: true
 
 volumes:
   pgdata:
