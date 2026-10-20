@@ -314,9 +314,9 @@ M1 腳本的回歸：
 | device flow 無法在自動化測試中執行 | 自動化測試沿用 password grant 測試帳號，device flow 以手動驗證 |
 | 多 worker 同時寫入稽核 | advisory lock 序列化；整合測試以並行請求驗證 chain 完整 |
 
-## 11. 撰寫實作計畫時的修正（2026-10-20）
+## 11. 撰寫計畫與實作審查時的修正（2026-10-20）
 
-計畫前實測後，以下細節與上文不同，以本節為準：
+計畫前實測與實作審查後，以下細節與上文不同，以本節為準；「並發建立審批」以下各列為實作時經審查新增：
 
 | 項目 | 上文 | 修正 | 理由 |
 | ---- | ---- | ---- | ---- |
@@ -329,5 +329,11 @@ M1 腳本的回歸：
 | 稽核驗證 | `agw audit verify` 直接讀資料庫 | 經 `GET /governance/audit/verify`（`compliance_supervisor`） | CLI 不需資料庫憑證 |
 | 寫入一致性 | 未說明 | 審批狀態變更與對應的稽核事件在同一個 transaction 寫入 | 避免「狀態變了但沒有稽核」 |
 | account_ops 的 tool 鎖定 | 未說明 | M2 不設定 | 不在 M2 驗收情境中 |
-| Postgres port | 未對外 | 開 `127.0.0.1:5433` | 主機上的整合測試需要連線 |
+| Postgres port | 未對外 | 開 `127.0.0.1:55433` | 主機上的整合測試需要連線；5433 在開發機上已被其他程式佔用 |
 | 情境 4 | alice 自己核准 | 新增測試帳號 carol（analyst + compliance_supervisor），由 carol 委託後自己核准 | alice 沒有主管角色，只會得到 `role_required`，測不到 maker-checker |
+| 並發建立審批 | 相同 fingerprint 已有 pending 時沿用 | store 契約保證每個 fingerprint 最多一筆 pending 或 approved（Postgres 部分唯一索引 `approvals_one_open`）；違反時 raise `ApprovalConflict` 並整筆 rollback，引擎重新查詢後沿用或兌現，最多 3 次，仍衝突時 deny `approval_conflict` | 審查時發現並發請求會各自建立 pending 審批，同一組參數出現多筆可核准的審批 |
+| JSON 欄位型別 | `arguments` 為 jsonb | `arguments`、`reasons` 改為 `json` | jsonb 會改寫數字（`1e22` 讀回成整數、`-0.0` 讀回成 `0.0`），讀回後重算的 hash 對不上，整條 chain 驗證失敗 |
+| 驗證順序 | 先解析 `key_alias` | 先驗證使用者 token，再判斷 agent key 是否符合 `<agent>@<版本>` | 未註冊版本的拒絕也要記錄是代表哪位使用者，稽核才能追到委託人 |
+| 核准角色 | 只檢查全域的 `compliance_supervisor` | 另外要求核准者具有該筆審批儲存的 `approver_role`；`list(expired)` 會一併取回已逾期但尚未落帳的審批 | policy 可依情況指定不同的核准角色；逾期在讀取時才落帳，只查 expired 會漏掉 |
+| API 錯誤代碼 | 未說明 | 沒有 token 時先回 `401 missing_token`，不觸及資料庫；資料庫連不上回 `503 governance_store_unavailable`，其他資料庫錯誤回 `500 governance_store_error`；hook 遇到資料庫中斷時拒絕原因為 `governance_store_unavailable`；`comment` 最多 2000 字 | 未登入的請求不應能探測後端狀態；呼叫端要能區分暫時性與永久性錯誤 |
+| CLI 錯誤處理 | 未說明 | 網路錯誤與格式不正確的回應以結束碼 1 結束，只印例外類別名稱；device flow 以伺服器給的 `expires_in` 為期限；token 檔案 0600、目錄 0700；`--status` 限定為審批狀態列舉 | 例外訊息可能含 URL 或標頭；避免無限輪詢與其他使用者讀取 token |
