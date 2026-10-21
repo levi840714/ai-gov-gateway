@@ -151,7 +151,7 @@ async def main() -> int:
         describe(report),
     )
 
-    unregistered = await freeze(5000, key="kyt-agent@1.5")
+    unregistered = await freeze(5000, key="kyt-agent@9.9")
     check(
         "8 未註冊版本被拒",
         unregistered.status == "denied"

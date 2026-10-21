@@ -29,7 +29,7 @@ sanctioned := "0x8589427373D6D84E98730D7795D8F6F8731FDA16"
 test_watchlist_allowed if {
 	result := governance.decision with input as call("add_to_watchlist", {"account_id": "a", "reason": "r"})
 	result.decision == "allow"
-	result.policy_version == "2026-10-20.1"
+	result.policy_version == "2026-10-21.1"
 }
 
 test_small_freeze_allowed if {
@@ -71,7 +71,7 @@ test_str_always_reviewed if {
 }
 
 test_unregistered_version_denied if {
-	input_doc := object.union(freeze(5000, clean), {"agent": {"id": "kyt-agent", "version": "1.5", "key_alias": "kyt-agent@1.5"}})
+	input_doc := object.union(freeze(5000, clean), {"agent": {"id": "kyt-agent", "version": "9.9", "key_alias": "kyt-agent@9.9"}})
 	result := governance.decision with input as input_doc
 	result.decision == "deny"
 	result.reasons == ["unregistered_agent_version"]

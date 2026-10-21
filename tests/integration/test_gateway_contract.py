@@ -98,3 +98,19 @@ def test_second_authorization_header_is_rejected_on_llm_routes():
     assert rejected.status_code == 400
     assert rejected.json() == {"detail": "ambiguous_authorization_headers"}
     assert httpx.get(f"{LITELLM_URL}/v1/models", headers=headers).status_code == 200
+
+
+async def test_delegator_can_query_pending_status():
+    account = f"contract-{uuid.uuid4().hex[:8]}"
+    result = await call_tool(
+        "kyt-agent@1.4", "alice", "file_str", {"account_id": account, "summary": "s"}
+    )
+    approval_id = result.body["approval_id"]
+    headers = {"Authorization": f"Bearer {user_token('alice')}"}
+    response = httpx.get(
+        f"{LITELLM_URL}/governance/approvals/{approval_id}/status", headers=headers
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "pending"
+    missing = httpx.get(f"{LITELLM_URL}/governance/approvals/apr_missing/status", headers=headers)
+    assert missing.status_code == 404
