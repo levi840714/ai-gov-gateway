@@ -11,7 +11,7 @@ from ai_gov_gateway.engine.models import Decision, ToolCall
 from ai_gov_gateway.engine.store import StoreError, StoreUnavailable
 from ai_gov_gateway.runtime import Services, get_services
 from tests.fakes import FakeClock, FakePolicy, InMemoryStore, id_sequence, policy_result
-from tests.jwt_helpers import alice_token, bob_token, carol_token, make_verifier
+from tests.jwt_helpers import alice_token, bob_token, carol_token, make_token, make_verifier
 
 
 @pytest.fixture
@@ -165,3 +165,24 @@ def test_comment_too_long_is_rejected(client):
         headers=_auth(bob_token()),
     )
     assert response.status_code == 422
+
+
+async def test_delegator_reads_own_status(client, services):
+    approval_id = await _pending(services)
+    response = client.get(
+        f"/governance/approvals/{approval_id}/status", headers=_auth(alice_token())
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "pending"
+    assert "arguments" not in response.json()
+
+
+async def test_status_of_others_is_not_found(client, services):
+    approval_id = await _pending(services)
+    dave = make_token("dave", ["analyst"])
+    response = client.get(f"/governance/approvals/{approval_id}/status", headers=_auth(dave))
+    assert (response.status_code, response.json()["detail"]) == (404, "approval_not_found")
+
+
+def test_status_requires_token(client):
+    assert client.get("/governance/approvals/apr_1/status").status_code == 401

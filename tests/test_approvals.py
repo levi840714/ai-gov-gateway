@@ -176,3 +176,53 @@ async def test_approval_requires_its_own_approver_role(service, store, clock):
     with pytest.raises(ApprovalError) as error:
         await service.approve(BOB, outcome.approval_id, "")
     assert (error.value.status_code, error.value.code) == (403, "role_required")
+
+
+ALICE_ONLY = UserIdentity(sub="alice-sub", username="alice", roles=["analyst"])
+
+
+async def test_delegator_can_view_own_status(service, pending):
+    approval_id = await pending()
+    view = await service.status(ALICE_ONLY, approval_id)
+    assert (view.id, view.status, view.reasons) == (
+        approval_id,
+        ApprovalStatus.PENDING,
+        ["amount_over_threshold"],
+    )
+    assert view.decided_at is None
+    assert set(view.model_dump()) == {"id", "status", "reasons", "expires_at", "decided_at"}
+
+
+async def test_supervisor_can_view_status(service, pending):
+    approval_id = await pending()
+    assert (await service.status(BOB, approval_id)).status is ApprovalStatus.PENDING
+
+
+async def test_other_user_gets_not_found(service, pending):
+    approval_id = await pending()
+    with pytest.raises(ApprovalError) as error:
+        await service.status(ANALYST, approval_id)
+    assert (error.value.status_code, error.value.code) == (404, "approval_not_found")
+
+
+async def test_status_of_missing_approval(service):
+    with pytest.raises(ApprovalError) as error:
+        await service.status(BOB, "apr_missing")
+    assert error.value.status_code == 404
+
+
+async def test_status_marks_due_approval_expired(service, store, clock, pending):
+    approval_id = await pending()
+    clock.advance(hours=25)
+    view = await service.status(ALICE_ONLY, approval_id)
+    assert view.status is ApprovalStatus.EXPIRED
+    assert store.audit[-1].event_type == "approval_expired"
+
+
+async def test_other_user_probe_writes_no_audit(service, store, clock, pending):
+    approval_id = await pending()
+    clock.advance(hours=25)
+    before = len(store.audit)
+    with pytest.raises(ApprovalError):
+        await service.status(ANALYST, approval_id)
+    assert len(store.audit) == before

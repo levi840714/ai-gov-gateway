@@ -5,7 +5,12 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
-from ai_gov_gateway.engine.approvals import ApprovalDetail, ApprovalError, AuditVerification
+from ai_gov_gateway.engine.approvals import (
+    ApprovalDetail,
+    ApprovalError,
+    ApprovalStatusView,
+    AuditVerification,
+)
 from ai_gov_gateway.engine.models import Approval, ApprovalStatus, UserIdentity
 from ai_gov_gateway.engine.store import StoreError, StoreUnavailable
 from ai_gov_gateway.engine.tokens import TokenError
@@ -75,6 +80,16 @@ async def list_approvals(
 async def get_approval(approval_id: str, user: UserDep, services: ServicesDep) -> ApprovalDetail:
     try:
         return await services.approvals.get(user, approval_id)
+    except FAILURES as error:
+        raise _http_error(error) from error
+
+
+@router.get("/approvals/{approval_id}/status", response_model=ApprovalStatusView)
+async def approval_status(
+    approval_id: str, user: UserDep, services: ServicesDep
+) -> ApprovalStatusView:
+    try:
+        return await services.approvals.status(user, approval_id)
     except FAILURES as error:
         raise _http_error(error) from error
 

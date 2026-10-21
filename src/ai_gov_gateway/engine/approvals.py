@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from pydantic import BaseModel
 
 from ai_gov_gateway.engine.audit import approval_event, first_invalid
@@ -30,6 +32,16 @@ class AuditVerification(BaseModel):
     first_invalid_id: int | None
 
 
+class ApprovalStatusView(BaseModel):
+    """委託人查詢自己審批時看到的欄位；不含參數與核准意見。"""
+
+    id: str
+    status: ApprovalStatus
+    reasons: list[str]
+    expires_at: datetime
+    decided_at: datetime | None
+
+
 class ApprovalService:
     def __init__(
         self, *, store: GovernanceStore, approver_role: str, clock: Clock = utc_now
@@ -58,6 +70,20 @@ class ApprovalService:
 
     async def reject(self, actor: UserIdentity, approval_id: str, comment: str) -> Approval:
         return await self._decide(actor, approval_id, comment, ApprovalStatus.REJECTED)
+
+    async def status(self, actor: UserIdentity, approval_id: str) -> ApprovalStatusView:
+        approval = await self._store.get_approval(approval_id)
+        # 先檢查可見性再處理過期，避免他人探測 approval_id 時寫入稽核
+        if approval is None or not self._may_view_status(actor, approval):
+            raise ApprovalError(404, "approval_not_found")
+        approval = await self._expire_if_due(approval)
+        return ApprovalStatusView(
+            id=approval.id,
+            status=approval.status,
+            reasons=approval.reasons,
+            expires_at=approval.expires_at,
+            decided_at=approval.decided_at,
+        )
 
     async def verify_audit(self, actor: UserIdentity) -> AuditVerification:
         self._require_role(actor)
@@ -112,6 +138,9 @@ class ApprovalService:
         )
         refreshed = await self._store.get_approval(approval.id)
         return refreshed or approval
+
+    def _may_view_status(self, actor: UserIdentity, approval: Approval) -> bool:
+        return actor.sub == approval.user_sub or self._approver_role in actor.roles
 
     def _require_role(self, actor: UserIdentity) -> None:
         if self._approver_role not in actor.roles:
