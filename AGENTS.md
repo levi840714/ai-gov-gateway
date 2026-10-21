@@ -10,7 +10,7 @@ AI Governance Gateway（`ai-gov-gateway`）：統一治理 agent 的 LLM 流量�
 | ---- | ---- | ---- |
 | M1 | 技術驗證：LiteLLM（LLM + MCP gateway）、Keycloak、OBO，決定 M2 架構 | 完成 |
 | M2 | 治理服務：以 LiteLLM hook 為執行點，OPA policy、maker-checker 審批、稽核 log、高風險 tool | 完成 |
-| M3 | kyt_agent 接入：以 `kyt-agent@<版本>` key 呼叫 account_ops 的高風險 tool，pending 時中斷並以相同參數重送 | 未開始 |
+| M3 | kyt_agent 接入：以 `kyt-agent@1.5` key 呼叫 account_ops 的 `add_to_watchlist`、`file_str`，pending 時中斷，經狀態查詢 API 確認核准後以相同參數重送 | 完成 |
 
 ## 目錄結構
 
@@ -20,7 +20,7 @@ ai-gov-gateway/
 ├── docker-compose.yml       # gateway、postgres、keycloak、opa、account_ops、probe_mcp（image 固定版本）
 ├── src/ai_gov_gateway/
 │   ├── engine/              # 治理引擎：models、fingerprint、tokens、policy、store、postgres、audit、engine、approvals
-│   ├── api/                 # /governance 路由（審批、稽核驗證）
+│   ├── api/                 # /governance 路由（審批、狀態查詢、稽核驗證）
 │   ├── plugin.py            # LiteLLM guardrail；載入時掛上 /governance 路由與 Authorization header 檢查（只在 gateway 映像內 import）
 │   ├── hook_adapter.py      # LiteLLM hook 的 data → ToolCall
 │   ├── runtime.py           # 由 Settings 組出 Services（lazy 單例）
@@ -29,16 +29,16 @@ ai-gov-gateway/
 ├── policies/                # governance.rego、Rego 測試、agents/tools/sanctions/meta 的 data.json
 ├── account_ops/             # 模擬下游 MCP server（三個 tool）
 ├── litellm/                 # config.yaml（模型別名、MCP server、OBO、pinned_tools、guardrail）
-├── keycloak/                # realm-governance.json（測試帳號與 client）
+├── keycloak/                # realm-governance.json（測試帳號與 client；kyt-cli 的 direct access grants 供 kyt_agent 使用）
 ├── probe_mcp/               # 測試用上游 MCP server
-├── scripts/                 # M1 驗證腳本、agent_sim、demo_m2
+├── scripts/                 # M1 驗證腳本、agent_sim、demo_m2、make_keys
 ├── tests/                   # 單元測試；integration/ 需要 docker compose 服務
 ├── docs/                    # specs/、plans/、spikes/
 └── var/                     # 執行產物，含 keys.json（不進版控）
 ```
 
 LiteLLM 固定在 v1.105.1：tool 定義鎖定從此版起才有；`plugin.py` 依賴 `CustomGuardrail` 介面、`litellm.proxy.proxy_server.app`（含已建好的 `middleware_stack`）與 hook 的 `mcp_*` 欄位。
-**升級 LiteLLM 前必須跑 `uv run pytest -m integration`**（含 gateway 契約測試），結果須為 16 passed 而非 skipped。
+**升級 LiteLLM 前必須跑 `uv run pytest -m integration`**（含 gateway 契約測試），結果須為 17 passed 而非 skipped。
 
 `engine/` 不 import LiteLLM、FastAPI 與 `config`；依賴方向為 `plugin` / `api` → `runtime` → `engine` / `config`，`runtime` 負責把設定注入引擎。
 

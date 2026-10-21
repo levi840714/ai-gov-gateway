@@ -122,12 +122,12 @@ agent 用 MCP client 連到 `http://localhost:4000/mcp`，並帶上兩個 header
 
 | Header | 內容 |
 | ------ | ---- |
-| `x-litellm-api-key` | `Bearer <agent 版本的 virtual key>`，例如 `kyt-agent@1.4` 的 key |
+| `x-litellm-api-key` | `Bearer <agent 版本的 virtual key>`，例如 `kyt-agent@1.5` 的 key |
 | `Authorization` | `Bearer <委託人的 Keycloak access token>` |
 
 `Authorization` 只能有一個。如果還帶了其他以 `authorization` 開頭的 header，gateway 會回 `400 ambiguous_authorization_headers`，以免稽核記錄的使用者和下游實際執行的使用者對不上。
 
-收到 `pending_approval` 時，agent 記下 `approval_id`，等主管核准後，用一模一樣的參數再送一次就好，不需要額外的參數或 API。可以參考 [`scripts/agent_sim.py`](scripts/agent_sim.py)。
+收到 `pending_approval` 時，agent 記下 `approval_id`，等主管核准後，用一模一樣的參數再送一次就好，不需要額外的參數。重送前可以用委託人的 token 呼叫 `GET /governance/approvals/{id}/status` 確認是否已核准，避免在待審期間重送。可以參考 [`scripts/agent_sim.py`](scripts/agent_sim.py)；實際接入的例子是 kyt_agent v1.5。
 
 LLM 的請求用 OpenAI 相容格式送到 `http://localhost:4000/v1`，模型名稱用 `litellm/config.yaml` 裡定義的別名。
 
@@ -148,12 +148,13 @@ uv run agw audit verify                            # 驗證整條稽核紀錄
 
 ### 審批 API
 
-請求需帶 Keycloak access token（`Authorization: Bearer`）：
+請求需帶 Keycloak access token（`Authorization: Bearer`）。除了狀態查詢，其餘端點都要求 `compliance_supervisor` 角色：
 
 | 方法與路徑 | 用途 |
 | ---------- | ---- |
 | `GET /governance/approvals?status=pending` | 列出審批 |
 | `GET /governance/approvals/{id}` | 查看詳情與歷史 |
+| `GET /governance/approvals/{id}/status` | 查詢審批狀態，供 agent 在重送前確認；委託人本人或主管可查，其他人一律 404。只回傳 `id`、`status`、`reasons`、`expires_at`、`decided_at`，不含參數與核准意見 |
 | `POST /governance/approvals/{id}/approve` | 核准，body 為 `{"comment": "…"}`，最多 2000 字 |
 | `POST /governance/approvals/{id}/reject` | 駁回 |
 | `GET /governance/audit/verify` | 驗證稽核紀錄，回傳 `{"records": N, "first_invalid_id": null}` |
@@ -201,7 +202,7 @@ policies/
 
 常見的操作：
 
-- 上線新的 agent 版本：在 `agents/data.json` 的 `versions` 加上 `key_alias`，再建立同名的 virtual key
+- 上線新的 agent 版本：在 `agents/data.json` 的 `versions` 加上 `key_alias`，再建立同名的 virtual key（`scripts/make_keys.py` 會建立缺少的 key，並以 `/key/update` 同步既有 key 的權限）。目前註冊的是 `kyt-agent@1.4` 與 `kyt-agent@1.5`；`kyt-agent@1.5` 的 key 只開放 `account_ops` 的 `add_to_watchlist` 與 `file_str`
 - 修改規則：記得更新 `meta/data.json` 的 `policy_version`，送 PR 前先跑下面三個指令
 
 ```bash
@@ -276,8 +277,8 @@ uv run mypy src
 
 | 測試 | 數量 | 涵蓋範圍 |
 | ---- | ---- | -------- |
-| 單元測試 | 165 | 引擎、審批、token 驗證、稽核、API、CLI、hook 轉接 |
-| 整合測試 | 16 | Postgres store（含並行寫入與數值精確度），以及 gateway 與 LiteLLM 的介面契約 |
+| 單元測試 | 174 | 引擎、審批、token 驗證、稽核、API、CLI、hook 轉接 |
+| 整合測試 | 17 | Postgres store（含並行寫入與數值精確度），以及 gateway 與 LiteLLM 的介面契約（含狀態查詢 API） |
 | Rego 測試 | 33 | 每條規則、欄位缺漏或資料錯誤時的預設拒絕、資料完整性 |
 | 端到端示範 | 13 個情境 | `scripts/demo_m2.py` |
 
@@ -308,10 +309,11 @@ uv run mypy src
 | ---- | ---- | ---- |
 | M1 | 技術驗證：LiteLLM 的 LLM 與 MCP gateway、Keycloak、token exchange | 完成 |
 | M2 | 治理服務：policy、agent 版本、maker-checker 審批、hash chain 稽核 | 完成 |
-| M3 | 讓鏈上風險調查 agent（kyt_agent）接上高風險 tool | 規劃中 |
+| M3 | kyt_agent v1.5 經 gateway 執行列入監控名單與送出 STR，等待核准時以狀態查詢 API 確認後重送 | 完成 |
 
 ## 文件
 
+- M3 的設計在 kyt_agent repo 的 `docs/specs/2026-10-21-kyt-agent-v1.5-design.md`（§8 為 gateway 的改動，§11 為實作後修訂）
 - [M2 治理服務設計](docs/specs/2026-10-20-m2-governance-design.md)：架構、決策流程、policy、審批與稽核；實作時的調整記錄在 §11
 - [M1 技術驗證結果](docs/spikes/m1-findings.md)：LiteLLM 開源版能做到哪些事，以及為什麼治理要放在 hook
 - [實作計畫](docs/plans/)
