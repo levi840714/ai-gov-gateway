@@ -47,22 +47,24 @@ def create_key(alias: str, body: dict) -> str:
     return str(response.json()["key"])
 
 
-def update_key(key: str, body: dict) -> None:
+def update_key(key: str, body: dict) -> bool:
+    """回傳 False 表示 LiteLLM 已無此 key（例如 DB 重置），呼叫端需重新建立。"""
     response = httpx.post(
         f"{LITELLM_URL}/key/update",
         headers={"Authorization": f"Bearer {env('LITELLM_MASTER_KEY')}"},
         json={"key": key, **body},
     )
+    if response.status_code == 404:
+        return False
     response.raise_for_status()
+    return True
 
 
 if __name__ == "__main__":
     KEYS_FILE.parent.mkdir(exist_ok=True)
     stored = json.loads(KEYS_FILE.read_text()) if KEYS_FILE.exists() else {}
     for alias, body in KEYS.items():
-        if alias in stored:
-            update_key(stored[alias], body)
-        else:
+        if alias not in stored or not update_key(stored[alias], body):
             stored[alias] = create_key(alias, body)
-    KEYS_FILE.write_text(json.dumps(stored, indent=2))
+        KEYS_FILE.write_text(json.dumps(stored, indent=2))
     print("keys:", ", ".join(sorted(stored)))

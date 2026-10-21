@@ -283,7 +283,7 @@ uv run agw audit verify
 | 5 | 核准後修改金額重送 | 新的 pending |
 | 6 | `freeze_account` 涉及制裁地址、金額小 | pending：`sanctioned_counterparty` |
 | 7 | `file_str` | pending：`str_always_reviewed` |
-| 8 | 以未註冊的 `kyt-agent@1.5` key 呼叫 | denied：`unregistered_agent_version` |
+| 8 | 以未註冊的 `kyt-agent@9.9` key 呼叫 | denied：`unregistered_agent_version` |
 | 9 | 核准後將 agent 設為 suspended 再重送 | denied：`agent_suspended` |
 | 10 | 以 bob（無 analyst 角色）為委託人呼叫 | denied：`role_required` |
 | 11 | 停止 OPA 後呼叫 | denied：`policy_unavailable` |
