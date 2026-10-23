@@ -414,9 +414,40 @@ def test_known_values_prefer_the_longest_match_and_handle_deep_nesting():
         pseudonyms.token("PHONE", value)
     [span] = pseudonyms.occurrences("x 09123456789 y")
     assert (span.start, span.end) == (2, 13)
-    # 每個前綴都是一個值時分支層數等於長度，要退回逐值比對而不是失敗
+    # 每個前綴都是一個值時分支最深，長度上限內仍要能編譯
     nested = PseudonymMap()
-    for length in range(1, 1001):
+    for length in range(1, PseudonymMap.MAX_VALUE_CHARS + 1):
         nested.token("API_KEY", "k" * length)
-    [span] = nested.occurrences(" " + "k" * 1000 + " ")
-    assert (span.start, span.end) == (1, 1001)
+    [span] = nested.occurrences(" " + "k" * PseudonymMap.MAX_VALUE_CHARS + " ")
+    assert (span.start, span.end) == (1, PseudonymMap.MAX_VALUE_CHARS + 1)
+
+
+def test_overlong_value_fails_closed_with_400():
+    pseudonyms = PseudonymMap()
+    pseudonyms.token("API_KEY", "k" * PseudonymMap.MAX_VALUE_CHARS)
+    with pytest.raises(GuardrailError) as error:
+        pseudonyms.token("API_KEY", "k" * (PseudonymMap.MAX_VALUE_CHARS + 1))
+    assert error.value.status == 400
+    assert error.value.body()["reasons"] == ["pii_value_too_long"]
+
+
+def test_comb_of_api_keys_fails_closed_quickly(detector):
+    keys = ["sk-" + "x" * (16 + i) + "y" for i in range(600)]
+    text = " ".join(keys)
+    started = time.perf_counter()
+    with pytest.raises(GuardrailError) as error:
+        Pseudonymizer(detector, ["API_KEY"], []).mask(text, PseudonymMap())
+    assert error.value.body()["reasons"] == ["pii_value_too_long"]
+    assert time.perf_counter() - started < 1.5
+
+
+def test_trie_build_failure_fails_closed(monkeypatch):
+    def broken(values):
+        raise RecursionError
+
+    monkeypatch.setattr("ai_gov_gateway.engine.guardrails.pii._trie_pattern", broken)
+    pseudonyms = PseudonymMap()
+    pseudonyms.token("EMAIL", "a@example.com")
+    with pytest.raises(GuardrailError) as error:
+        pseudonyms.occurrences("a@example.com")
+    assert error.value.body()["reasons"] == ["too_many_pii_values"]

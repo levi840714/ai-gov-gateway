@@ -215,13 +215,6 @@ def select_spans(text: str, spans: list[PiiSpan], exclude: list[str]) -> list[Pi
     return merged
 
 
-def _bounded(value: str) -> str:
-    # 與 recognizer 相同的邊界，避免在無關的長數字、ID 或 hex 中間誤換；非英數的邊緣不需要
-    left = _L if value[0].isalnum() else ""
-    right = _R if value[-1].isalnum() else ""
-    return left + re.escape(value) + right
-
-
 _END = ""
 
 
@@ -257,10 +250,9 @@ def _trie_pattern(values: Iterable[str]) -> re.Pattern[str]:
 def _known_pattern(values: set[str]) -> re.Pattern[str]:
     try:
         return _trie_pattern(values)
-    except (RecursionError, re.error):
-        # 分支層數過深時 regex 編譯會失敗，退回逐值比對（較慢但結果相同）
-        ordered = sorted(values, key=len, reverse=True)
-        return re.compile("|".join(map(_bounded, ordered)))
+    except (RecursionError, re.error) as error:
+        # 逐值比對的備援在最壞情況下要數秒，寧可拒絕請求
+        raise GuardrailError(400, "too_many_pii_values") from error
 
 
 class PseudonymMap:
@@ -268,6 +260,8 @@ class PseudonymMap:
 
     # 已登錄原值的比對成本是 文字長度 × 值的數量，上限讓最壞情況維持在一秒內
     MAX_VALUES = 1000
+    # 值越長，前綴樹越深；API key、ID 與 email 都遠短於此
+    MAX_VALUE_CHARS = 256
 
     def __init__(self, reserved: dict[str, set[int]] | None = None) -> None:
         self._reserved = reserved or {}
@@ -291,6 +285,8 @@ class PseudonymMap:
     def token(self, entity: str, value: str) -> str:
         key = (entity, value)
         if key not in self._tokens:
+            if len(value) > self.MAX_VALUE_CHARS:
+                raise GuardrailError(400, "pii_value_too_long")
             if len(self._tokens) >= self.MAX_VALUES:
                 raise GuardrailError(400, "too_many_pii_values")
             number = self._next.get(entity, 1)
