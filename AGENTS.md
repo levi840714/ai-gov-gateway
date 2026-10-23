@@ -39,7 +39,7 @@ ai-gov-gateway/
 ├── scripts/                 # M1 驗證腳本、agent_sim、llm_sim、demo_m2、demo_m4、make_keys
 │   └── spikes/              # M4 實作前的 hook 驗證（m4_spike、m4_hook_probe）
 ├── tests/                   # 單元測試；integration/ 需要 docker compose 服務
-├── docs/                    # specs/、plans/、spikes/
+├── docs/                    # specs/、plans/、spikes/、images/architecture.svg（README 最上方的能力架構圖，新增或移除能力時同步編輯）
 └── var/                     # 執行產物，含 keys.json（不進版控）
 ```
 

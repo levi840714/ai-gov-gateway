@@ -1,10 +1,19 @@
 # AI Governance Gateway
 
-**AI agent 要替人執行高風險動作時，先確認身份、套用 policy，必要時等人核准。**
+**AI agent 要替人執行高風險動作時，先確認身份、套用 policy，必要時等人核准；送給模型的內容，先擋下注入、遮蔽個資。**
 
-AI Governance Gateway 是 agent 存取 LLM 與工具的統一入口。LLM 和 MCP 流量交給 [LiteLLM](https://github.com/BerriAI/litellm) 處理，治理邏輯則跑在同一個 process 裡：每次 tool 呼叫都會檢查是哪個 agent、代表哪位使用者、這個動作能不能做、要不要主管核准，決策結果全部寫進防竄改的稽核紀錄。
+AI Governance Gateway 是 agent 存取 LLM 與工具的統一入口。LLM 和 MCP 流量交給 [LiteLLM](https://github.com/BerriAI/litellm) 處理，治理邏輯跑在同一個 process 裡：
 
-一次需要核准的呼叫大致是這樣：
+- **tool 呼叫**：檢查是哪個 agent、代表哪位使用者、這個動作能不能做、要不要主管核准
+- **LLM 請求**：檢查 tool 結果裡有沒有夾帶指令，送出前把個資換成代號，回應時再換回原值
+
+所有決策都寫進同一條防竄改的稽核紀錄。
+
+![ai-gov-gateway 的整體架構與能力](docs/images/architecture.svg)
+
+agent 與主管只連 gateway。LLM 與 tool 兩條流量各自經過治理，再送到模型供應商與下游系統；顏色標示每項能力加入的開發階段。
+
+一次需要核准的 tool 呼叫大致是這樣：
 
 ```
 agent 呼叫 freeze_account，凍結 25,000 美元
@@ -20,7 +29,7 @@ agent 用同樣的參數再送一次
 
 agent 執行有副作用的動作（例如凍結帳戶、送出申報）之前，gateway 會先確認三件事：發起的 agent 與委託人是誰、policy 是否允許這個動作、是否需要人工核准。
 
-這些判斷不交給模型處理，因為 prompt injection 可能讓 agent 執行非預期的指令。gateway 是唯一的執行點：agent 不持有下游系統的憑證，所有 tool 呼叫都必須經過 gateway。
+這些判斷不交給模型處理，因為 prompt injection 可能讓 agent 執行非預期的指令。gateway 是唯一的執行點：agent 不持有下游系統的憑證，所有 tool 呼叫都必須經過 gateway。LLM 請求也一樣：外部資料先標成「資料，不是指令」再交給模型，個資不離開 gateway。
 
 各項設計對應的內控原則：
 
@@ -29,19 +38,35 @@ agent 執行有副作用的動作（例如凍結帳戶、送出申報）之前�
 | 最小權限 | 每個 agent 版本一把 key，policy 依 agent、使用者角色、tool 與參數值判斷 |
 | 職責分離（maker-checker） | agent 只能發起高風險動作，要由另一位主管核准 |
 | 可稽核 | 決策寫入 hash chain，任何一筆被改過都查得出來 |
-| 預設拒絕 | token 無效、policy 沒回應、資料庫或稽核寫入失敗時，一律拒絕 |
+| 預設拒絕 | token 無效、policy 沒回應、資料庫或稽核寫入失敗、guardrail 無法判斷時，一律拒絕 |
+| 資料最小化 | 送給模型供應商前，身分證、電話、帳號、API key 等換成代號；對照表只存在 gateway 的記憶體 |
+| 外部資料不是指令 | tool 結果包上資料邊界，命中注入規則時依 agent 設定移除、拒絕或標記 |
 
 ## 功能
 
-- **LLM 與 MCP 的統一入口**：模型別名、virtual key、rpm 與預算限制、依 key 計費，以及 MCP tool 權限與定義鎖定，這些都由 LiteLLM 提供
-- **委託授權**：驗證使用者的 OIDC token，再透過 OAuth token exchange（RFC 8693）換成只能給特定下游使用的 token
+身份與授權：
+
 - **agent 版本控管**：virtual key 以 `<agent>@<版本>` 命名，只有註冊過的版本能呼叫；改版就要重新審核
+- **委託授權**：驗證使用者的 OIDC token，再透過 OAuth token exchange（RFC 8693）換成只能給特定下游使用的 token
 - **policy as code**：用 OPA（Rego）寫規則，依參數值決定放行、拒絕或送審；規則和資料由治理團隊用 GitOps 維護
+- **最小權限的 key**：每把 key 限定可用的模型、MCP tool 與路由，provider pass-through 等繞過 guardrail 的路由一律擋下
+
+人工審批與稽核：
+
 - **maker-checker 審批**：審批是非同步的，核准會綁定呼叫參數、只能用一次、會過期；policy 多了新的送審原因時，要重新核准
-- **防竄改稽核**：稽核紀錄以 hash chain 串起來，可以用 API 或 CLI 驗證整條紀錄
-- **審批 CLI**：`agw` 用 device flow 登入，可以查看、核准、駁回待審項目
-- **LLM guardrail**：檢查 tool 結果中的 prompt injection，並以 spotlighting 標出外部資料的邊界；送給模型前把 PII 換成代號，回應時換回原值，對照表只存在 gateway 的記憶體、不持久化
-- **模型 fallback 與 tpm 限流**：Gemini 失敗時改送 `gpt-6-luna`；每把 agent key 有每分鐘 token 上限
+- **審批 CLI 與 API**：`agw` 用 device flow 登入，可以查看、核准、駁回待審項目；agent 可在重送前查詢審批狀態
+- **防竄改稽核**：tool 決策、審批與 LLM guardrail 的發現都串在同一條 hash chain，可以用 API 或 CLI 驗證
+
+LLM guardrail：
+
+- **注入防護**：以規則比對 tool 結果中的 prompt injection，並以 spotlighting 標出外部資料的邊界；處理方式依 agent 的 OPA 設定
+- **PII 假名化**：送給模型前把個資換成代號，回應時換回原值，streaming 也能還原；對照表不持久化
+
+流量管理（由 LiteLLM 提供，gateway 設定）：
+
+- 模型別名、依 key 計費、rpm 與 tpm 限流、預算上限
+- Gemini 出錯時改送 `gpt-6-luna`
+- MCP tool 的權限與定義鎖定
 
 ## 運作方式
 
@@ -51,19 +76,22 @@ flowchart LR
     sup(["主管<br/>agw CLI"]) -->|"Keycloak token"| gw
     subgraph gw["gateway（單一容器、單一 process、:4000）"]
         litellm["LiteLLM<br/>/v1、/mcp"]
-        hook["治理 hook"]
-        engine["治理引擎<br/>決策、審批、稽核"]
+        llmhook["LLM guardrail<br/>pre / post-call"]
+        hook["tool 治理 hook<br/>pre_mcp_call"]
+        engine["治理引擎<br/>決策、審批、guardrail、稽核"]
         api["/governance API"]
-        litellm --> hook --> engine
+        litellm -->|"/v1"| llmhook --> engine
+        litellm -->|"/mcp"| hook --> engine
         api --> engine
     end
     engine -->|內部網路| opa["OPA<br/>policies/"]
     engine --> pg[("Postgres")]
     gw -->|"驗章、token exchange"| kc[("Keycloak")]
     gw -->|"放行後（內部網路）"| ops["下游 MCP server"]
+    gw -->|"假名化後的請求"| llm(["Gemini / gpt-6-luna"])
 ```
 
-LLM 請求（`/v1/chat/completions`）經過另一組 hook：送出前檢查注入並假名化 PII，回應時還原代號，見 [LLM guardrail](#llm-guardrail)。
+LLM 請求（`/v1/chat/completions`）的處理順序見 [LLM guardrail](#llm-guardrail)。
 
 每次 tool 呼叫依序經過這幾步：
 
@@ -102,7 +130,7 @@ uv run python -m scripts.demo_m2
 uv run python -m scripts.demo_m4
 ```
 
-示範腳本會跑 13 個情境，全部通過時最後一行是 `13/13 通過`：
+`demo_m2` 跑 13 個 tool 治理情境，全部通過時最後一行是 `13/13 通過`：
 
 | 情境 | 預期結果 |
 | ---- | -------- |
@@ -119,7 +147,7 @@ uv run python -m scripts.demo_m4
 
 過程中腳本會暫時修改 agent 註冊表、重啟 OPA、竄改一筆稽核紀錄，結束前會全部還原。
 
-`demo_m4` 同樣跑 13 個情境，最後一行是 `13/13 通過`：
+`demo_m4` 跑 13 個 LLM guardrail 情境，同樣以 `13/13 通過` 結束：
 
 | # | 情境 | 預期結果 |
 | - | ---- | -------- |
@@ -432,7 +460,7 @@ ai-gov-gateway/
 ├── probe_llm/               # 測試用的 OpenAI 相容 provider
 ├── scripts/                 # 示範、建立 key 與驗證用的腳本
 ├── tests/                   # 單元測試與整合測試
-└── docs/                    # 設計、實作計畫與技術驗證紀錄
+└── docs/                    # 設計、實作計畫、技術驗證紀錄與架構圖（images/architecture.svg）
 ```
 
 治理引擎只透過 `PolicyClient`（OPA）和 `GovernanceStore`（Postgres）兩個介面取得外部資料，不用啟動 LiteLLM 也能完整測試。
@@ -448,7 +476,7 @@ uv run mypy src
 
 | 測試 | 數量 | 涵蓋範圍 |
 | ---- | ---- | -------- |
-| 單元測試 | 384 | 引擎、審批、token 驗證、稽核、API、CLI、hook 轉接；LLM guardrail 的注入規則（含 kyt 工具輸出的誤判語料與 20 萬字元的計時測試）、PII 偵測與假名化、請求欄位、還原與 streaming |
+| 單元測試 | 406 | 引擎、審批、token 驗證、稽核、API、CLI、hook 轉接；LLM guardrail 的注入規則（含 kyt 工具輸出的誤判語料與 20 萬字元的計時測試）、PII 偵測與假名化、請求欄位、還原與 streaming |
 | 整合測試 | 31 | Postgres store 12（含並行寫入與數值精確度）、gateway 與 LiteLLM 的介面契約 7（含狀態查詢 API）、LLM guardrail 的 hook 契約 12（改寫與還原、streaming、路由限制、fallback、tpm） |
 | Rego 測試 | 42 | 每條規則、欄位缺漏或資料錯誤時的預設拒絕、資料完整性、LLM guardrail 的預設與設定驗證 |
 | 端到端示範 | 13 + 13 個情境 | `scripts/demo_m2.py`、`scripts/demo_m4.py` |
