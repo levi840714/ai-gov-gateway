@@ -1,4 +1,5 @@
 import re
+import threading
 from datetime import UTC, datetime, timedelta
 from itertools import count
 from typing import Any
@@ -176,13 +177,16 @@ class FakePiiDetector:
 
     def __init__(self) -> None:
         self.fail: Exception | None = None
+        self.pattern = re.compile(r"[a-z]+@example\.com")
+        self.threads: set[str] = set()
 
     def detect(self, text: str, entities: list[str]) -> list[PiiSpan]:
+        self.threads.add(threading.current_thread().name)
         if self.fail is not None:
             raise self.fail
         if "EMAIL" not in entities:
             return []
         return [
             PiiSpan(entity="EMAIL", start=m.start(), end=m.end())
-            for m in re.finditer(r"[a-z]+@example\.com", text)
+            for m in self.pattern.finditer(text)
         ]
