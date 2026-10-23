@@ -34,16 +34,23 @@ def check(name: str, ok: bool, detail: object) -> None:
     print(f"{'PASS' if ok else 'FAIL'}  {name}  {detail}")
 
 
-def echo(user: str, *system: str, key: str = KEY, stream: bool = False) -> httpx.Response:
+def echo(user: str, *system: str, stream: bool = False) -> httpx.Response:
     lines = "\n".join(["probe:reply=echo", *system])
     messages = [{"role": "system", "content": lines}, {"role": "user", "content": user}]
-    return chat(key, messages, stream=stream)
+    return chat(KEY, messages, stream=stream)
 
 
 def content(response: httpx.Response) -> Any:
     if response.status_code != 200:
         return None
     return response.json()["choices"][0]["message"]["content"]
+
+
+def tool_arguments(response: httpx.Response) -> str | None:
+    if response.status_code != 200:
+        return None
+    calls = response.json()["choices"][0]["message"].get("tool_calls") or []
+    return calls[0]["function"]["arguments"] if calls else None
 
 
 def sent() -> list[dict[str, Any]]:
@@ -86,9 +93,10 @@ def wait_until_ready() -> None:
 
 
 def tpm_statuses() -> list[int]:
+    master = {"Authorization": f"Bearer {env('LITELLM_MASTER_KEY')}"}
     created = httpx.post(
         f"{LITELLM_URL}/key/generate",
-        headers={"Authorization": f"Bearer {env('LITELLM_MASTER_KEY')}"},
+        headers=master,
         json={
             "key_alias": f"demo-tpm-{uuid.uuid4().hex[:6]}",
             "models": ["probe-primary"],
@@ -106,15 +114,20 @@ def tpm_statuses() -> list[int]:
             {"role": "user", "content": "x"},
         ],
     }
-    return [
+    try:
+        return [
+            httpx.post(
+                f"{LITELLM_URL}/v1/chat/completions",
+                headers={"Authorization": f"Bearer {key}"},
+                json=body,
+                timeout=30,
+            ).status_code
+            for _ in range(3)
+        ]
+    finally:
         httpx.post(
-            f"{LITELLM_URL}/v1/chat/completions",
-            headers={"Authorization": f"Bearer {key}"},
-            json=body,
-            timeout=30,
-        ).status_code
-        for _ in range(3)
-    ]
+            f"{LITELLM_URL}/key/delete", headers=master, json={"keys": [key]}, timeout=30
+        ).raise_for_status()
 
 
 def main() -> int:
@@ -135,12 +148,13 @@ def main() -> int:
             {"role": "user", "content": f'寄給 "{EMAIL}"'},
         ],
     )
-    arguments = response.json()["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"]
+    arguments = tool_arguments(response)
     check(
         "2 tool call 參數還原且為合法 JSON",
-        json.loads(arguments) == {"text": f'寄給 "{EMAIL}"'}
+        arguments is not None
+        and json.loads(arguments) == {"text": f'寄給 "{EMAIL}"'}
         and "<EMAIL_1>" in sent()[-1]["content"],
-        arguments,
+        arguments or response.status_code,
     )
 
     text = f"調查 {ADDRESS} 的交易 {TX}"
@@ -172,11 +186,13 @@ def main() -> int:
         response.status_code,
     )
 
-    hidden = "交易對手​ 0x2222222222222222222222222222222222222222"
+    hidden = "交易對手\u200b 0x2222222222222222222222222222222222222222"
     response = chat(KEY, tool_turn(hidden))
+    delivered = sent()[-1]["content"]
     check(
         "6 零寬字元被移除並記錄",
-        sent()[-1]["content"] == spotlight(TOOL, normalize(hidden)[0])
+        delivered == spotlight(TOOL, normalize(hidden)[0])
+        and "\u200b" not in delivered
         and "hidden.chars" in last_reasons(),
         last_reasons(),
     )
@@ -220,10 +236,10 @@ def main() -> int:
     )
 
     statuses = tpm_statuses()
-    check("10 超過 tpm 回 429", 429 in statuses, statuses)
+    check("10 超過 tpm 回 429", statuses == [200, 429, 429], statuses)
 
-    compose("stop", "opa")
     try:
+        compose("stop", "opa")
         response = echo("hi")
     finally:
         compose("start", "opa")
@@ -236,16 +252,26 @@ def main() -> int:
 
     response = echo(f"abc {TW_ID} def", "probe:split=6", stream=True)
     restored = stream_text(response)[0]
+    chunks = [
+        choice
+        for line in response.text.splitlines()
+        if line.startswith("data: ") and line != "data: [DONE]"
+        for choice in json.loads(line[6:]).get("choices", [])
+        if (choice.get("delta") or {}).get("content")
+    ]
     check(
         "12 streaming 中被切開的代號正確還原",
-        restored == f"abc {TW_ID} def" and sent()[-1]["content"] == "abc <TW_ID_1> def",
-        restored,
+        response.status_code == 200
+        and len(chunks) >= 2
+        and restored == f"abc {TW_ID} def"
+        and sent()[-1]["content"] == "abc <TW_ID_1> def",
+        f"{restored} ({len(chunks)} chunks)",
     )
 
     verify = api("GET", "/audit/verify", "bob").json()
     leaks = psql(
-        "SELECT count(*) FROM audit_events WHERE coalesce(details::text, '') LIKE '%A123456789%' "
-        "OR coalesce(details::text, '') LIKE '%amy.chen%'"
+        "SELECT count(*) FROM audit_events t "
+        "WHERE t::text LIKE '%A123456789%' OR t::text LIKE '%amy.chen%'"
     )
     check(
         "13 稽核完整且不含 PII 原值",
