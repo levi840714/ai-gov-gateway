@@ -3,6 +3,21 @@ model_list:
     litellm_params:
       model: gemini/gemini-3.8-flash
       api_key: os.environ/GOOGLE_API_KEY
+  # 測試 provider：demo 與整合測試用，不花 LLM 費用
+  - model_name: probe-primary
+    litellm_params:
+      model: openai/probe-primary
+      api_base: http://probe_llm:8300/v1
+      api_key: probe
+  - model_name: probe-fallback
+    litellm_params:
+      model: openai/probe-fallback
+      api_base: http://probe_llm:8300/v1
+      api_key: probe
+
+router_settings:
+  fallbacks: [{"probe-primary": ["probe-fallback"]}]
+  num_retries: 1
 
 general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY

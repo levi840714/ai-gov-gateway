@@ -34,6 +34,10 @@ KEYS = {
     "kyt-agent@1.4": MCP_ACCESS,
     "kyt-agent@1.5": KYT_V15_ACCESS,
     "kyt-agent@9.9": MCP_ACCESS,
+    # M4 guardrail 的 demo 與整合測試：kyt 的設定、未登記 agent 的預設、tpm
+    "kyt-agent@llm-demo": {"models": ["probe-primary", "probe-fallback"]},
+    "guard-strict": {"models": ["probe-primary", "probe-fallback"]},
+    "guard-tpm": {"models": ["probe-primary"], "tpm_limit": 1000},
 }
 
 

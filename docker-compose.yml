@@ -23,6 +23,14 @@ services:
     ports:
       - "127.0.0.1:8100:8100"
 
+  probe_llm:
+    build:
+      context: .
+      dockerfile: probe_llm/Dockerfile
+    # 只綁 127.0.0.1：demo 與整合測試要讀取它記錄的請求
+    ports:
+      - "127.0.0.1:8300:8300"
+
   postgres:
     image: postgres:17.6
     environment:
