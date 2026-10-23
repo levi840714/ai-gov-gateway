@@ -5,10 +5,13 @@ import pytest
 
 from ai_gov_gateway.engine.guardrails.pii import PseudonymMap
 from ai_gov_gateway.hook_adapter import (
+    DuplicateCallId,
     PendingPseudonyms,
+    PseudonymsEvicted,
     RestoreError,
     client_body,
     has_ambiguous_authorization,
+    owner_of,
     restore_response,
     restore_stream,
     tool_call_from_hook,
@@ -188,26 +191,116 @@ class _Clock:
         return self.now
 
 
+def _stored(value: str = "amy@example.com") -> PseudonymMap:
+    pseudonyms = PseudonymMap()
+    pseudonyms.token("EMAIL", value)
+    return pseudonyms
+
+
+def test_owner_is_a_hash_of_the_litellm_token():
+    owner = owner_of(NS(token="hashed-key", api_key="sk-raw"))
+    assert owner is not None and len(owner) == 64 and "hashed-key" not in owner
+    assert owner_of(NS(token=None, api_key="sk-raw")) not in (None, owner)
+    assert owner_of(NS()) is None
+
+
 def test_pending_pseudonyms_pop_once():
     pending = PendingPseudonyms()
-    pending.remember("c1", _pseudonyms())
-    assert pending.pop("c1") is not None
-    assert pending.pop("c1") is None
-    assert pending.pop(None) is None
+    pending.remember("o1", "c1", _stored())
+    assert pending.pop("o1", "c1") is not None
+    assert pending.pop("o1", "c1") is None
+    assert pending.pop("o1", None) is None
+    assert pending.pop(None, "c1") is None
+
+
+def test_pending_pseudonyms_are_scoped_to_the_caller():
+    pending = PendingPseudonyms()
+    pending.remember("o1", "c1", _stored())
+    pending.remember("o2", "c1", _stored("bob@example.com"))
+    assert pending.pop("o2", "c1").restore("<EMAIL_1>") == "bob@example.com"
+    assert pending.pop("o1", "c1").restore("<EMAIL_1>") == "amy@example.com"
+
+
+def test_duplicate_call_id_is_rejected_instead_of_overwritten():
+    pending = PendingPseudonyms()
+    pending.remember("o1", "c1", _stored())
+    with pytest.raises(DuplicateCallId):
+        pending.remember("o1", "c1", _stored("bob@example.com"))
+    assert pending.pop("o1", "c1").restore("<EMAIL_1>") == "amy@example.com"
+
+
+class _SpyMap(PseudonymMap):
+    discarded = False
+
+    def discard_cache(self) -> None:
+        self.discarded = True
+        super().discard_cache()
+
+
+def test_compiled_pattern_is_discarded_before_storing():
+    pseudonyms = _SpyMap()
+    pseudonyms.token("EMAIL", "amy@example.com")
+    PendingPseudonyms().remember("o1", "c1", pseudonyms)
+    assert pseudonyms.discarded
 
 
 def test_pending_pseudonyms_drop_expired_and_excess_entries(caplog):
     clock = _Clock()
     pending = PendingPseudonyms(max_entries=2, ttl_seconds=600, clock=clock)
-    pending.remember("old", _pseudonyms())
+    pending.remember("o", "old", _stored())
     clock.now = 601
-    pending.remember("a", _pseudonyms())
-    pending.remember("b", _pseudonyms())
-    pending.remember("c", _pseudonyms())
-    assert (pending.pop("old"), pending.pop("a")) == (None, None)
+    pending.remember("o", "a", _stored())
+    pending.remember("o", "b", _stored())
+    pending.remember("o", "c", _stored())
     assert len(pending) == 2
     assert [r.getMessage() for r in caplog.records] == [
         "dropped pending pseudonym maps: expired=1 evicted=0",
         "dropped pending pseudonym maps: expired=0 evicted=1",
     ]
     assert "example.com" not in caplog.text
+
+
+def test_pending_pseudonyms_are_bounded_by_total_value_chars():
+    pending = PendingPseudonyms(max_value_chars=40)
+    pending.remember("o", "a", _stored("a" * 20 + "@example.com"))
+    pending.remember("o", "b", _stored("b" * 20 + "@example.com"))
+    assert len(pending) == 1
+    assert pending.pop("o", "b") is not None
+    pending.remember("o", "c", _stored("c" * 20 + "@example.com"))
+    assert len(pending) == 1
+
+
+def test_evicted_pseudonyms_fail_instead_of_returning_tokens():
+    pending = PendingPseudonyms(max_entries=1)
+    pending.remember("o", "a", _stored())
+    pending.remember("o", "b", _stored())
+    with pytest.raises(PseudonymsEvicted):
+        pending.pop("o", "a")
+    assert pending.pop("o", "a") is None
+
+
+def test_evicted_call_id_cannot_be_reused_before_it_is_reported():
+    pending = PendingPseudonyms(max_entries=1)
+    pending.remember("o", "a", _stored())
+    pending.remember("o", "b", _stored())
+    with pytest.raises(DuplicateCallId):
+        pending.remember("o", "a", _stored())
+
+
+def test_discard_ignores_evicted_entries():
+    pending = PendingPseudonyms(max_entries=1)
+    pending.remember("o", "a", _stored())
+    pending.remember("o", "b", _stored())
+    pending.discard("o", "a")
+    pending.discard("o", "b")
+    assert len(pending) == 0
+    assert pending.pop("o", "a") is None
+
+
+def test_evicted_keys_are_bounded():
+    pending = PendingPseudonyms(max_entries=1, max_evicted=1)
+    for call_id in ("a", "b", "c"):
+        pending.remember("o", call_id, _stored())
+    assert pending.pop("o", "a") is None
+    with pytest.raises(PseudonymsEvicted):
+        pending.pop("o", "b")

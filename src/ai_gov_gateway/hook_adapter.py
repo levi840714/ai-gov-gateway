@@ -4,6 +4,7 @@ from collections import OrderedDict
 from collections.abc import AsyncIterator, Callable, Iterable, Mapping
 from typing import Any
 
+from ai_gov_gateway.engine.fingerprint import sha256_hex
 from ai_gov_gateway.engine.guardrails.pii import PseudonymMap, StreamTextRestorer
 from ai_gov_gateway.engine.models import ToolCall
 
@@ -45,8 +46,28 @@ def client_body(data: Mapping[str, Any]) -> Mapping[str, Any] | None:
     return body if isinstance(body, Mapping) else None
 
 
+def owner_of(user_api_key_dict: Any) -> str | None:
+    """呼叫者的識別：LiteLLM 的 token 已是 key 的雜湊，再雜湊一次確保記憶體中不留 key 原文。"""
+    for name in ("token", "api_key"):
+        value = getattr(user_api_key_dict, name, None)
+        if isinstance(value, str) and value:
+            return sha256_hex(value)
+    return None
+
+
+class DuplicateCallId(Exception):
+    """同一個呼叫者重複使用 call_id；call_id 可由 client 以 x-litellm-call-id 指定。"""
+
+
+class PseudonymsEvicted(Exception):
+    """對照表在回應前就被回收；照原樣回傳會把代號交給 client，因此改為失敗。"""
+
+
+PendingKey = tuple[str, str]
+
+
 class PendingPseudonyms:
-    """pre-call 到 post-call 之間的對照表；只在記憶體，數量與存放時間都有上限。
+    """pre-call 到 post-call 之間的對照表；只在記憶體，數量、原值總長度與存放時間都有上限。
 
     rate limit 觸發的 fallback 會留下收不到後續 hook 的 call_id，只能靠上限回收。
     """
@@ -55,39 +76,81 @@ class PendingPseudonyms:
         self,
         *,
         max_entries: int = 1000,
+        max_value_chars: int = 20_000_000,
         ttl_seconds: float = 600.0,
+        max_evicted: int = 10_000,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
-        self._entries: OrderedDict[str, tuple[float, PseudonymMap]] = OrderedDict()
+        self._entries: OrderedDict[PendingKey, tuple[float, PseudonymMap]] = OrderedDict()
+        self._evicted: OrderedDict[PendingKey, None] = OrderedDict()
+        self._value_chars = 0
         self._max_entries = max_entries
+        self._max_value_chars = max_value_chars
         self._ttl = ttl_seconds
+        self._max_evicted = max_evicted
         self._clock = clock
 
     def __len__(self) -> int:
         return len(self._entries)
 
-    def remember(self, call_id: str, pseudonyms: PseudonymMap) -> None:
+    def remember(self, owner: str, call_id: str, pseudonyms: PseudonymMap) -> None:
+        key = (owner, call_id)
+        if key in self._entries or key in self._evicted:
+            raise DuplicateCallId()
+        # 編譯好的比對樹遠大於原值本身，post-call 只需要代號與原值
+        pseudonyms.discard_cache()
         now = self._clock()
+        self._entries[key] = (now, pseudonyms)
+        self._value_chars += pseudonyms.value_chars
         expired = 0
-        while self._entries and next(iter(self._entries.values()))[0] <= now - self._ttl:
-            self._entries.popitem(last=False)
+        while self._entries and self._oldest_time() <= now - self._ttl:
+            self._evict()
             expired += 1
-        self._entries.pop(call_id, None)
-        self._entries[call_id] = (now, pseudonyms)
         evicted = 0
-        while len(self._entries) > self._max_entries:
-            self._entries.popitem(last=False)
+        while len(self._entries) > self._max_entries or self._value_chars > self._max_value_chars:
+            self._evict()
             evicted += 1
         if expired or evicted:
             logger.warning(
                 "dropped pending pseudonym maps: expired=%d evicted=%d", expired, evicted
             )
 
-    def pop(self, call_id: object) -> PseudonymMap | None:
-        if not isinstance(call_id, str):
+    def pop(self, owner: str | None, call_id: object) -> PseudonymMap | None:
+        """沒有對照表時回傳 None；曾經有但已被回收時丟出 PseudonymsEvicted。"""
+        key = self._key(owner, call_id)
+        if key is None:
             return None
-        entry = self._entries.pop(call_id, None)
-        return entry[1] if entry else None
+        entry = self._entries.pop(key, None)
+        if entry is not None:
+            self._value_chars -= entry[1].value_chars
+            return entry[1]
+        if key in self._evicted:
+            del self._evicted[key]
+            raise PseudonymsEvicted()
+        return None
+
+    def discard(self, owner: str | None, call_id: object) -> None:
+        """請求失敗時清掉；不論是否已被回收都不需要再還原。"""
+        try:
+            self.pop(owner, call_id)
+        except PseudonymsEvicted:
+            pass
+
+    def _oldest_time(self) -> float:
+        return next(iter(self._entries.values()))[0]
+
+    def _evict(self) -> None:
+        key, (_, pseudonyms) = self._entries.popitem(last=False)
+        self._value_chars -= pseudonyms.value_chars
+        self._evicted[key] = None
+        while len(self._evicted) > self._max_evicted:
+            self._evicted.popitem(last=False)
+
+    @staticmethod
+    def _key(owner: str | None, call_id: object) -> PendingKey | None:
+        if not owner or not isinstance(call_id, str) or not call_id:
+            return None
+        return (owner, call_id)
 
 
 class RestoreError(Exception):

@@ -305,6 +305,11 @@ class PseudonymMap:
             self._known = None
         return self._tokens[key]
 
+    @property
+    def value_chars(self) -> int:
+        """已登錄原值的總字元數；暫存對照表的一方以此限制記憶體。"""
+        return self._total_chars
+
     def discard_cache(self) -> None:
         """丟掉編譯好的比對樹，只留代號與原值；之後若再比對會重新建立。"""
         self._known = None

@@ -16,13 +16,17 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from ai_gov_gateway.api.approvals import router
 from ai_gov_gateway.engine.guardrails.fields import check_request
 from ai_gov_gateway.engine.guardrails.models import GuardrailError
+from ai_gov_gateway.engine.guardrails.pii import PseudonymMap
 from ai_gov_gateway.engine.models import Outcome
 from ai_gov_gateway.engine.store import StoreUnavailable
 from ai_gov_gateway.hook_adapter import (
+    DuplicateCallId,
     PendingPseudonyms,
+    PseudonymsEvicted,
     RestoreError,
     client_body,
     has_ambiguous_authorization,
+    owner_of,
     restore_response,
     restore_stream,
     tool_call_from_hook,
@@ -100,6 +104,14 @@ def _reject(status: int, code: str) -> HTTPException:
     return HTTPException(status_code=status, detail=GuardrailError(status, code).body())
 
 
+def _take(user_api_key_dict: Any, data: dict[str, Any]) -> PseudonymMap | None:
+    try:
+        return _PENDING.pop(owner_of(user_api_key_dict), data.get("litellm_call_id"))
+    except PseudonymsEvicted:
+        logger.error("llm guardrail pseudonyms were evicted before the response")
+        raise _reject(502, "guardrail_output_error") from None
+
+
 class LlmGuardrailHook(CustomGuardrail):
     async def async_pre_call_hook(
         self, user_api_key_dict: Any, cache: Any, data: dict[str, Any], call_type: str
@@ -126,16 +138,20 @@ class LlmGuardrailHook(CustomGuardrail):
             logger.error("llm guardrail failed: %s", type(error).__name__)
             raise _reject(503, "guardrail_unavailable") from None
         if guarded.pseudonyms:
-            if not isinstance(call_id, str) or not call_id:
+            owner = owner_of(user_api_key_dict)
+            if owner is None or not isinstance(call_id, str) or not call_id:
                 raise _reject(503, "guardrail_unavailable")
-            _PENDING.remember(call_id, guarded.pseudonyms)
+            try:
+                _PENDING.remember(owner, call_id, guarded.pseudonyms)
+            except DuplicateCallId:
+                raise _reject(503, "guardrail_unavailable") from None
         data["messages"] = guarded.messages
         return data
 
     async def async_post_call_success_hook(
         self, data: dict[str, Any], user_api_key_dict: Any, response: Any
     ) -> Any:
-        pseudonyms = _PENDING.pop(data.get("litellm_call_id"))
+        pseudonyms = _take(user_api_key_dict, data)
         if not pseudonyms:
             return response
         try:
@@ -153,13 +169,13 @@ class LlmGuardrailHook(CustomGuardrail):
         traceback_str: str | None = None,
     ) -> None:
         # MCP 被治理擋下時也會呼叫；call_id 不在表中就什麼都不做
-        _PENDING.pop(request_data.get("litellm_call_id"))
+        _PENDING.discard(owner_of(user_api_key_dict), request_data.get("litellm_call_id"))
 
     async def async_post_call_streaming_iterator_hook(
         self, user_api_key_dict: Any, response: Any, request_data: dict[str, Any]
     ) -> AsyncIterator[Any]:
         # streaming 不會呼叫 success hook，對照表在這裡取出
-        pseudonyms = _PENDING.pop(request_data.get("litellm_call_id"))
+        pseudonyms = _take(user_api_key_dict, request_data)
         if not pseudonyms:
             async for chunk in response:
                 yield chunk
