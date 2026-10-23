@@ -28,3 +28,4 @@ var/
 
 # Docker volumes
 data/
+!tests/data/
