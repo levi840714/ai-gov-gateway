@@ -40,7 +40,7 @@ agent 執行有副作用的動作（例如凍結帳戶、送出申報）之前�
 - **maker-checker 審批**：審批是非同步的，核准會綁定呼叫參數、只能用一次、會過期；policy 多了新的送審原因時，要重新核准
 - **防竄改稽核**：稽核紀錄以 hash chain 串起來，可以用 API 或 CLI 驗證整條紀錄
 - **審批 CLI**：`agw` 用 device flow 登入，可以查看、核准、駁回待審項目
-- **LLM guardrail**：檢查 tool 結果中的 prompt injection，並以 spotlighting 標出外部資料的邊界；送給模型前把 PII 換成代號，回應時換回原值，對照表只存在單次請求
+- **LLM guardrail**：檢查 tool 結果中的 prompt injection，並以 spotlighting 標出外部資料的邊界；送給模型前把 PII 換成代號，回應時換回原值，對照表只存在 gateway 的記憶體、不持久化
 - **模型 fallback 與 tpm 限流**：Gemini 失敗時改送 `gpt-6-luna`；每把 agent key 有每分鐘 token 上限
 
 ## 運作方式
@@ -233,7 +233,12 @@ agent 的調查工具多半在本地執行，外部資料（鏈上字串、文�
 
 回應時（post-call hook）：把內容與 tool call 參數裡本次請求發出的代號換回原值。streaming 時會暫存可能是代號開頭的片段，代號被切在兩個 chunk 之間也能還原。`API_KEY` 的代號不會還原進 tool call 參數，避免被注入的模型把金鑰帶出去。
 
-每次請求都重新處理整段歷史，對照表只存在 gateway 的記憶體，請求結束就丟掉。agent 拿到的永遠是原值，下次送出時再換一次代號即可。
+每次請求都重新處理整段歷史，agent 拿到的永遠是原值，下次送出時再換一次代號即可。對照表只存在 gateway 的記憶體，生命週期如下：
+
+- pre-call 以（呼叫者 key 的雜湊, `litellm_call_id`）存入；`call_id` 可由 client 以 `x-litellm-call-id` 指定，同一把 key 重複使用還在暫存中的 `call_id` 時回 `503 guardrail_unavailable`，不會覆蓋別的請求的對照表
+- 回應還原（非 streaming 在 success hook、streaming 在 iterator hook）或請求失敗（failure hook）時取出並刪除
+- tpm 或 rpm 觸發的 fallback 會以新的 `call_id` 重跑 pre-call，這份對照表收不到任何後續 hook，只能等回收：存放超過 10 分鐘、超過 1,000 份或原值總長度超過 2,000 萬字元時，從最舊的開始丟掉，並記一行只含數量的 warning
+- 對照表被回收後回應才到時回 `502 guardrail_output_error`，不會把代號原樣交給 client
 
 ### agent 的設定
 
@@ -286,7 +291,7 @@ agent 的調查工具多半在本地執行，外部資料（鏈上字串、文�
 - 偵測時全形字元先轉半形，緊鄰中文的 email 與卡號也偵測得到
 - 某個值在任何一則訊息被偵測到，其他訊息裡照抄的同一個值也會被遮蔽，即使那裡沒有「帳號」之類的關鍵字
 - 排除格式由 agent 設定引用，policy 資料不接受任意的正規表示式
-- 每次請求最多 1,000 個不同的值、單一值最多 2,048 字元，超過時拒絕
+- 每次請求最多 1,000 個不同的值、單一值最多 2,048 字元、所有值合計最多 65,536 字元，超過時拒絕
 
 ### 錯誤代碼
 
@@ -298,14 +303,14 @@ LiteLLM 會把錯誤包成 OpenAI 格式：HTTP 狀態碼不變，`error.provide
 | 400 | `content_too_large` | 單則訊息或整個請求超過掃描上限（NFKC 展開後也會再檢查） |
 | 400 | `unsupported_field` | 請求帶了 guardrail 不處理的欄位，`field` 為欄位名稱 |
 | 400 | `invalid_messages` | `messages` 不是物件陣列 |
-| 400 | `too_many_pii_values` | 單次請求的不同 PII 值超過 1,000 個 |
+| 400 | `too_many_pii_values` | 單次請求的不同 PII 值超過 1,000 個，或合計超過 65,536 字元 |
 | 400 | `pii_value_too_long` | 單一 PII 值超過 2,048 字元 |
 | 400 | `call_type_not_governed` | 非 chat completions 的呼叫進入 hook（例如 master key 呼叫 embeddings） |
 | 403 | `agent_suspended` | agent 已停用 |
-| 502 | `guardrail_output_error` | 回應的代號還原失敗，不回傳半還原的結果 |
+| 502 | `guardrail_output_error` | 回應的代號還原失敗，或對照表已被回收；不回傳半還原的結果 |
 | 503 | `policy_unavailable` | OPA 沒有回應或逾時 |
 | 503 | `policy_error` | OPA 回傳的設定不完整或名稱不支援 |
-| 503 | `guardrail_unavailable` | 規則比對或 PII 偵測發生例外 |
+| 503 | `guardrail_unavailable` | 規則比對或 PII 偵測發生例外，或同一把 key 重複使用暫存中的 `call_id` |
 | 503 | `audit_write_failed` | 有發現但稽核寫入失敗 |
 
 ### 稽核事件
@@ -476,7 +481,8 @@ LLM guardrail：
 - tool 結果在送進 LLM 時才檢查，agent 本地已經讀到原文；LLM 不經 gateway 的 agent 不受保護
 - 只有 tool 結果會正規化。其他訊息被零寬字元拆開的 email 不會被遮蔽
 - 只偵測固定格式的 PII，人名、地址不會被假名化；圖片等非文字內容不掃描
-- `user` 欄位，以及 `tools` 的描述、`response_format` 的 schema、`stop`、tool 名稱不遮蔽，這些視為開發者定義的內容
+- `user` 欄位，以及 `tools` 的描述、`response_format` 的 schema、`stop`、tool 名稱不遮蔽，這些視為開發者定義的內容；`image_url` 只接受 `url` 與 `detail`，URL 本身不遮蔽
+- LLM guardrail 的 agent 身份只取 key 名稱 `@` 之前的部分，不看 M2 的 `versions` 註冊表：例如未註冊的 `kyt-agent@9.9` 呼叫 LLM 時也套用 kyt 的設定（MCP 呼叫仍會被 M2 拒絕）
 - 欄位白名單也會拒絕 `presence_penalty`、`logprobs`、`reasoning_effort`、`cache_control` 等正常參數，需要時再加入 `engine/guardrails/fields.py`
 - 受治理的 key 只能呼叫 chat completions：`/v1/models`、Azure 風格的路由、provider pass-through 都會被擋
 - 含 PII 的 tool call id 遮蔽後含有 `<` `>`，部分 provider 會以 400 拒絕

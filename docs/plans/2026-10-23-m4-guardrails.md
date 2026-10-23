@@ -3257,7 +3257,7 @@ git add AGENTS.md
 git commit -m "docs: update AGENTS.md for M4"
 ```
 
-- [ ] **Step 4: root repo 學習文件與索引**
+- [ ] **Step 4: root repo 的專案文件與索引**
 
 - `../AGENTS.md` 專案索引：ai-gov-gateway 的主題加上 LLM guardrail，狀態改為「M4 完成」
 - `../docs/ai-gov-gateway/06-m4-guardrails.md`：設計取捨（guardrail 放在 LLM 入口的理由、可逆假名化不需持久化對照表、規則比對加 spotlighting 的多層防護）、hook 的生命週期、Task 2 的驗證結論、demo 與真實 eval 的結果（數字引用 `var/m4-demo.txt`、`var/m4-kyt-eval.txt`、`var/m4-fallback-eval.txt` 與 findings），程式碼連結附行號

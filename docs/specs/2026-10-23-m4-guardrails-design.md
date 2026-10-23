@@ -309,7 +309,7 @@ OpenAI 相容的測試 provider，只接內部網路：
 - 單元、Rego、整合測試全部通過；M2 的整合測試與 `demo_m2.py` 13/13 不受影響
 - `demo_m4.py` 13/13
 - 真實 LLM 的兩項驗證通過
-- README、AGENTS.md 更新；root repo 的學習文件另外撰寫
+- README、AGENTS.md 更新；root repo 的專案文件另外撰寫
 
 ## 12. 風險
 
@@ -339,7 +339,7 @@ OpenAI 相容的測試 provider，只接內部網路：
 | `rules_version` | （未定） | `2026-10-23.2` | 上述規則調整後的版本 |
 | PII 偵測的文字 | 原文 | 在長度不變的折疊副本上偵測：全形 ASCII 轉半形；交給 Presidio 的副本另把非 ASCII 字元換成空白 | Presidio 的 `\b` 把中文當成字元，緊鄰中文的 email、卡號會漏掉；長度不變才能把範圍直接對回原文 |
 | 假名化的步驟 | 逐則訊息偵測後替換 | 兩階段：先登錄所有訊息裡偵測到的值，再逐則遮蔽；遮蔽時也替換已登錄的值（前後必須是邊界，以前綴樹 regex 比對） | 關鍵字只出現在後面的訊息時（例如「帳號」），前面照抄的同一個值也要遮蔽；模型照抄的值沒有上下文也偵測不到 |
-| 假名化的上限 | （未提及） | 每次請求最多 1,000 個不同的值（`too_many_pii_values`）、單值最多 2,048 字元（`pii_value_too_long`）；前綴樹編譯失敗時拒絕，沒有逐值比對的慢速退路 | 比對成本是文字長度 × 值的數量，上限讓最壞情況維持在一秒內；2,048 字元涵蓋常見的 JWT |
+| 假名化的上限 | （未提及） | 每次請求最多 1,000 個不同的值、所有值合計最多 65,536 字元（`too_many_pii_values`），單值最多 2,048 字元（`pii_value_too_long`）；前綴樹編譯失敗時拒絕，沒有逐值比對的慢速退路 | 比對的成本隨文字長度與值的數量成長，前綴樹的編譯時間與記憶體隨所有值的總長度成長，三個上限一起限制最壞情況；2,048 字元涵蓋常見的 JWT |
 | 假名化的範圍 | 訊息內容與 tool call 參數 | 另加訊息的 `name`、`tool_call_id` 與 `tool_calls[].id`，兩邊用同一個代號 | 這些欄位會原樣送給 provider；兩邊代號一致，模型才對得起 tool call 與結果 |
 | tool 參數的還原 | 所有代號 | `restore_json` 不把 `API_KEY` 還原進 tool call 參數；沒有任何代號被還原時回傳原字串 | 被注入的模型可以把金鑰的代號寫進 tool 參數帶出去；原樣回傳避免重新序列化改變數字格式 |
 | 請求欄位 | （未提及） | 欄位白名單（`engine/guardrails/fields.py`），其他欄位回 400 `unsupported_field`；`tools` 的描述、`response_format` 的 schema、`stop`、tool 名稱視為開發者定義，允許但不遮蔽 | guardrail 只遮蔽訊息與 tool 參數，其他欄位會原樣送出。嚴格白名單也會拒絕 `presence_penalty`、`logprobs`、`reasoning_effort`、`cache_control` 等，需要時再加入 |
@@ -349,7 +349,7 @@ OpenAI 相容的測試 provider，只接內部網路：
 | 訊息格式錯誤 | （未提及） | `messages` 不是物件陣列時回 400 `invalid_messages` | 避免格式錯誤的訊息被略過而原樣送出 |
 | 掃描上限 | 單則 `GOV_GUARDRAIL_MAX_CHARS` | 另加整個請求的 `GOV_GUARDRAIL_MAX_TOTAL_CHARS`（預設 1,000,000）；NFKC 展開後再檢查一次；規則比對與 PII 偵測以 `asyncio.to_thread` 執行 | NFKC 可能把一個字元展開成十幾個；CPU 工作不能卡住 gateway 的 event loop |
 | OPA 設定錯誤 | 只有 `policy_unavailable` | 設定缺欄位或名稱不支援時為 503 `policy_error` | 與 OPA 停擺分開，方便排查 |
-| 對照表的回收 | 單次請求內 | `PendingPseudonyms`：success、failure 與 streaming 結束時取出；另有 TTL 10 分鐘與 1,000 筆上限，丟棄時只記數量 | tpm / rpm 觸發時 proxy 以新的 `call_id` 重跑 pre-call，這個 `call_id` 收不到任何後續 hook；同一個請求也因此寫兩筆稽核 |
+| 對照表的回收 | 單次請求內 | `PendingPseudonyms`：以（key 雜湊, `call_id`）為鍵，重複的鍵回 503 而不覆蓋（`call_id` 可由 client 以 `x-litellm-call-id` 指定）；success、failure 與 streaming 結束時取出；另有 TTL 10 分鐘、1,000 筆與原值合計 2,000 萬字元的上限，丟棄時只記數量；被回收後回應才到時回 502 | tpm / rpm 觸發時 proxy 以新的 `call_id` 重跑 pre-call，這個 `call_id` 收不到任何後續 hook；同一個請求也因此寫兩筆稽核 |
 | streaming 的還原 | 文字保留緩衝；tool call 暫存到完整 | 每個 choice 各自處理文字；tool call 暫存到所有含 tool call 的 choice 都結束才還原；多留一個 chunk，串流沒有 `finish_reason` 就結束時暫存文字仍有地方放 | `n > 1` 時其他 choice 的參數可能還沒收完；最後一個 chunk 只帶 usage 時，暫存的文字可能遺失（已知限制） |
 | `streaming_with_pii_unsupported` | S4 不成立時使用 | 未使用 | S4 成立（findings A4） |
 | fallback 的觸發條件 | 只在 429、5xx、逾時與連線錯誤時 | 主力的任何錯誤都會觸發（§9 已改寫） | LiteLLM 沒有依狀態碼限制 fallback 的設定 |
