@@ -452,7 +452,8 @@ gateway 會留下以下紀錄，都在 compose 的 Postgres（`127.0.0.1:55433`�
 | 每次 LLM 呼叫的成本與延遲 | `litellm` | `LiteLLM_SpendLogs` | 成本、token、模型、key、狀態、`startTime` / `endTime` / `completionStartTime`（首個 token）、`request_duration_ms` |
 | 每天的成本、失敗率與延遲 | `litellm` | `LiteLLM_DailyModelUsage`、`LiteLLM_DailyTagSpend` | 依模型、key 彙總的成本、token、成功與失敗次數；`DailyTagSpend` 另有 cache 節省的金額與 `total_response_time_ms` |
 | 各路由的請求結果 | `litellm` | `LiteLLM_DailyGatewayRequests` | 每天每條路由的成功與失敗次數 |
-| key 的權限、限額與累計花費 | `litellm` | `LiteLLM_VerificationToken`、`LiteLLM_DeletedVerificationToken` | 可用模型、`allowed_routes`、rpm、tpm、`max_budget`、`spend`、`metadata`；刪除的 key 保留刪除時間與刪除者 |
+| 預算與限流 | `litellm` | `LiteLLM_VerificationToken` | 每把 key 的 `max_budget`、`budget_duration`、`rpm_limit`、`tpm_limit` 與目前的 `spend`；由 `scripts/make_keys.py` 設定。超過 rpm 或 tpm 時回 429，花費達到 `max_budget` 時拒絕，兩者都在呼叫模型前檢查 |
+| key 的權限與生命週期 | `litellm` | `LiteLLM_VerificationToken`、`LiteLLM_DeletedVerificationToken` | 可用模型、`allowed_routes`、`metadata`、到期與輪換設定；刪除的 key 保留刪除時間與刪除者 |
 | 實際被呼叫過的 MCP tool | `litellm` | `LiteLLM_ToolTable`、`LiteLLM_SpendLogToolIndex` | tool 名稱、來源 server、呼叫次數、最後使用時間；請求與 tool 的對應 |
 | 治理決策、審批與 guardrail 的發現 | `governance` | `audit_events`、`approvals` | tool 決策、審批的狀態變化、`llm_guardrail` 事件；以 hash chain 串接 |
 
