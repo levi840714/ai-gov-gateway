@@ -20,7 +20,8 @@ model_list:
       api_key: probe
 
 router_settings:
-  # Gemini 出錯（429、5xx、逾時、連線錯誤）時改送 gpt-6-luna；kyt 本身也會重試，gateway 端各只做一次
+  # 主力重試 num_retries 次後仍丟出任何例外（含 4xx，LiteLLM 無法依狀態碼過濾）就改送 fallback；
+  # kyt 本身也會重試
   fallbacks: [{"kyt-main": ["kyt-main-fallback"]}, {"probe-primary": ["probe-fallback"]}]
   num_retries: 1
 

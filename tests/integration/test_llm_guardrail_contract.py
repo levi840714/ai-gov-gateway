@@ -167,7 +167,7 @@ def test_tpm_limit_returns_429():
         for _ in range(3)
     ]
     # A8：tpm 依已完成的請求累計，第一次放行、之後超過上限
-    assert statuses[0] == 200 and 429 in statuses[1:], statuses
+    assert statuses == [200, 429, 429]
 
 
 def test_fallback_receives_pseudonymized_content():
@@ -175,11 +175,14 @@ def test_fallback_receives_pseudonymized_content():
         {"role": "system", "content": "probe:reply=echo\nprobe:fail=probe-primary"},
         {"role": "user", "content": TW_ID},
     ]
-    response = chat("kyt-agent@llm-demo", messages)
-    assert response.status_code == 200, response.text
-    sent = probe_requests()
-    assert [r["model"] for r in sent][-1] == "probe-fallback"
-    assert all(TW_ID not in json.dumps(r, ensure_ascii=False) for r in sent)
-    assert response.json()["choices"][0]["message"]["content"] == TW_ID
-    # 主力回 503 後 deployment 冷卻約 5 秒，等冷卻結束以免影響其他測試
-    time.sleep(6)
+    try:
+        response = chat("kyt-agent@llm-demo", messages)
+        assert response.status_code == 200, response.text
+        sent = probe_requests()
+        # 主力一次加 num_retries=1 次重試，之後才送 fallback
+        assert [r["model"] for r in sent] == ["probe-primary", "probe-primary", "probe-fallback"]
+        assert all(TW_ID not in json.dumps(r, ensure_ascii=False) for r in sent)
+        assert response.json()["choices"][0]["message"]["content"] == TW_ID
+    finally:
+        # 主力回 503 後 deployment 冷卻約 5 秒，等冷卻結束以免影響其他測試
+        time.sleep(6)
