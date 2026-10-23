@@ -237,7 +237,7 @@ agent 的調查工具多半在本地執行，外部資料（鏈上字串、文�
 
 - pre-call 以（呼叫者 key 的雜湊, `litellm_call_id`）存入；`call_id` 可由 client 以 `x-litellm-call-id` 指定，同一把 key 重複使用還在暫存中的 `call_id` 時回 `503 guardrail_unavailable`，不會覆蓋別的請求的對照表
 - 回應還原（非 streaming 在 success hook、streaming 在 iterator hook）或請求失敗（failure hook）時取出並刪除
-- tpm 或 rpm 觸發的 fallback 會以新的 `call_id` 重跑 pre-call，這份對照表收不到任何後續 hook，只能等回收：存放超過 10 分鐘、超過 1,000 份或原值總長度超過 2,000 萬字元時，從最舊的開始丟掉，並記一行只含數量的 warning
+- tpm 或 rpm 觸發的 fallback 會以新的 `call_id` 重跑 pre-call（client 以 `x-litellm-call-id` 指定 `call_id` 時則沿用同一個，因重複而回 503，而不是 429），這份對照表收不到任何後續 hook，只能等回收：存放超過 10 分鐘、超過 1,000 份或原值總長度超過 2,000 萬字元時，從最舊的開始丟掉，並記一行只含數量的 warning
 - 對照表被回收後回應才到時回 `502 guardrail_output_error`，不會把代號原樣交給 client
 
 ### agent 的設定

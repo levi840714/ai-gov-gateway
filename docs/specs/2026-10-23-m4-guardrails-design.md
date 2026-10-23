@@ -349,7 +349,7 @@ OpenAI 相容的測試 provider，只接內部網路：
 | 訊息格式錯誤 | （未提及） | `messages` 不是物件陣列時回 400 `invalid_messages` | 避免格式錯誤的訊息被略過而原樣送出 |
 | 掃描上限 | 單則 `GOV_GUARDRAIL_MAX_CHARS` | 另加整個請求的 `GOV_GUARDRAIL_MAX_TOTAL_CHARS`（預設 1,000,000）；NFKC 展開後再檢查一次；規則比對與 PII 偵測以 `asyncio.to_thread` 執行 | NFKC 可能把一個字元展開成十幾個；CPU 工作不能卡住 gateway 的 event loop |
 | OPA 設定錯誤 | 只有 `policy_unavailable` | 設定缺欄位或名稱不支援時為 503 `policy_error` | 與 OPA 停擺分開，方便排查 |
-| 對照表的回收 | 單次請求內 | `PendingPseudonyms`：以（key 雜湊, `call_id`）為鍵，重複的鍵回 503 而不覆蓋（`call_id` 可由 client 以 `x-litellm-call-id` 指定）；success、failure 與 streaming 結束時取出；另有 TTL 10 分鐘、1,000 筆與原值合計 2,000 萬字元的上限，丟棄時只記數量；被回收後回應才到時回 502 | tpm / rpm 觸發時 proxy 以新的 `call_id` 重跑 pre-call，這個 `call_id` 收不到任何後續 hook；同一個請求也因此寫兩筆稽核 |
+| 對照表的回收 | 單次請求內 | `PendingPseudonyms`：以（key 雜湊, `call_id`）為鍵，重複的鍵回 503 而不覆蓋（`call_id` 可由 client 以 `x-litellm-call-id` 指定）；success、failure 與 streaming 結束時取出；另有 TTL 10 分鐘、1,000 筆與原值合計 2,000 萬字元的上限，丟棄時只記數量；被回收後回應才到時回 502 | tpm / rpm 觸發時 proxy 以新的 `call_id` 重跑 pre-call，這個 `call_id` 收不到任何後續 hook；同一個請求也因此寫兩筆稽核。client 自訂 `x-litellm-call-id` 時重跑沿用同一個 id，會因重複回 503 而不是 429 |
 | streaming 的還原 | 文字保留緩衝；tool call 暫存到完整 | 每個 choice 各自處理文字；tool call 暫存到所有含 tool call 的 choice 都結束才還原；多留一個 chunk，串流沒有 `finish_reason` 就結束時暫存文字仍有地方放 | `n > 1` 時其他 choice 的參數可能還沒收完；最後一個 chunk 只帶 usage 時，暫存的文字可能遺失（已知限制） |
 | `streaming_with_pii_unsupported` | S4 不成立時使用 | 未使用 | S4 成立（findings A4） |
 | fallback 的觸發條件 | 只在 429、5xx、逾時與連線錯誤時 | 主力的任何錯誤都會觸發（§9 已改寫） | LiteLLM 沒有依狀態碼限制 fallback 的設定 |
