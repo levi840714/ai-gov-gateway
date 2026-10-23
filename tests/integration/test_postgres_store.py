@@ -199,3 +199,29 @@ async def test_concurrent_creates_for_one_fingerprint_have_one_winner(store):
     conflicts = [r for r in results if isinstance(r, ApprovalConflict)]
     assert len(conflicts) == 4
     assert len(await store.audit_records()) == 1
+
+
+async def test_llm_guardrail_details_survive_round_trip(store):
+    event = AuditEvent(
+        event_type="llm_guardrail",
+        agent_id="kyt-agent",
+        decision="flag",
+        reasons=["hidden.chars"],
+        details={"pii": {"TW_ID": 1}, "rules_version": "2026-10-23.1", "big": 1e22},
+    )
+    await store.append_audit(event, NOW)
+    records = await store.audit_records()
+    assert records[-1].details == {
+        "pii": {"TW_ID": 1},
+        "rules_version": "2026-10-23.1",
+        "big": 1e22,
+    }
+    assert first_invalid(records) is None
+
+
+async def test_ensure_schema_adds_details_to_existing_table(store):
+    async with await psycopg.AsyncConnection.connect(URL, autocommit=True) as conn:
+        await conn.execute("ALTER TABLE audit_events DROP COLUMN IF EXISTS details")
+    await store.ensure_schema()
+    await store.append_audit(AuditEvent(event_type="llm_guardrail", details={"a": 1}), NOW)
+    assert (await store.audit_records())[-1].details == {"a": 1}

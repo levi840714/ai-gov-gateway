@@ -95,3 +95,24 @@ def test_record_hash_golden_vector():
 def test_naive_timestamp_is_rejected():
     with pytest.raises(ValueError, match="timezone-aware"):
         record_hash(GENESIS_HASH, datetime(2026, 1, 1), _event(1))
+
+
+def test_details_is_omitted_from_hash_when_unset():
+    event = AuditEvent(event_type="decision", agent_id="kyt-agent", reasons=["x"])
+    assert "details" not in event.model_dump(mode="json", exclude_none=True)
+
+
+def test_llm_guardrail_event_with_details_verifies():
+    ts = datetime(2026, 10, 23, 9, tzinfo=UTC)
+    event = AuditEvent(
+        event_type="llm_guardrail",
+        agent_id="kyt-agent",
+        key_alias="kyt-agent",
+        decision="redact",
+        reasons=["override.en"],
+        details={"pii": {"EMAIL": 1}, "injection": [{"rule": "override.en", "tool": "t"}]},
+    )
+    record = build_record(record_id=1, prev_hash=GENESIS_HASH, ts=ts, event=event)
+    assert first_invalid([record]) is None
+    tampered = record.model_copy(update={"details": {"pii": {"EMAIL": 2}}})
+    assert first_invalid([tampered]) == 1

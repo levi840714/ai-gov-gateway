@@ -31,7 +31,7 @@ AUDIT_LOCK_KEY = 72_410_001
 ONE_OPEN_INDEX = "approvals_one_open"
 CONNECT_TIMEOUT_SECONDS = 5
 
-# arguments 與 reasons 用 json 而非 jsonb：jsonb 會改寫數字（1e22、-0.0），
+# arguments、reasons 與 details 用 json 而非 jsonb：jsonb 會改寫數字（1e22、-0.0），
 # 讀回後的 hash 就對不上。
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS approvals (
@@ -78,9 +78,11 @@ CREATE TABLE IF NOT EXISTS audit_events (
     approval_id text,
     policy_version text,
     comment text,
+    details json,
     prev_hash text NOT NULL,
     hash text NOT NULL
 );
+ALTER TABLE audit_events ADD COLUMN IF NOT EXISTS details json;
 """
 
 AUDIT_COLUMNS = (
@@ -102,6 +104,7 @@ AUDIT_COLUMNS = (
     "approval_id",
     "policy_version",
     "comment",
+    "details",
     "prev_hash",
     "hash",
 )
@@ -124,7 +127,7 @@ APPROVAL_FIELDS = (
     "comment",
     "used_at",
 )
-JSON_COLUMNS = {"arguments", "reasons"}
+JSON_COLUMNS = {"arguments", "reasons", "details"}
 
 
 def _db_value(column: str, value: Any) -> Any:

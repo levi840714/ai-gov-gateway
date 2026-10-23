@@ -113,6 +113,7 @@ AuditEventType = Literal[
     "approval_approved",
     "approval_rejected",
     "approval_expired",
+    "llm_guardrail",
 ]
 
 
@@ -133,6 +134,8 @@ class AuditEvent(BaseModel):
     approval_id: str | None = None
     policy_version: str | None = None
     comment: str | None = None
+    # LLM guardrail 的類型、數量與規則編號；不含 PII 原值與 tool 原文
+    details: dict[str, Any] | None = None
 
 
 class AuditRecord(AuditEvent):
