@@ -260,8 +260,8 @@ class PseudonymMap:
 
     # 已登錄原值的比對成本是 文字長度 × 值的數量，上限讓最壞情況維持在一秒內
     MAX_VALUES = 1000
-    # 值越長，前綴樹越深；API key、ID 與 email 都遠短於此
-    MAX_VALUE_CHARS = 256
+    # 涵蓋常見的 JWT；過深的前綴樹在編譯時會失敗並拒絕請求
+    MAX_VALUE_CHARS = 2048
 
     def __init__(self, reserved: dict[str, set[int]] | None = None) -> None:
         self._reserved = reserved or {}

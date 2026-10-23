@@ -414,12 +414,12 @@ def test_known_values_prefer_the_longest_match_and_handle_deep_nesting():
         pseudonyms.token("PHONE", value)
     [span] = pseudonyms.occurrences("x 09123456789 y")
     assert (span.start, span.end) == (2, 13)
-    # 每個前綴都是一個值時分支最深，長度上限內仍要能編譯
+    # 每個前綴都是一個值時分支最深，仍要能編譯
     nested = PseudonymMap()
-    for length in range(1, PseudonymMap.MAX_VALUE_CHARS + 1):
+    for length in range(1, 301):
         nested.token("API_KEY", "k" * length)
-    [span] = nested.occurrences(" " + "k" * PseudonymMap.MAX_VALUE_CHARS + " ")
-    assert (span.start, span.end) == (1, PseudonymMap.MAX_VALUE_CHARS + 1)
+    [span] = nested.occurrences(" " + "k" * 300 + " ")
+    assert (span.start, span.end) == (1, 301)
 
 
 def test_overlong_value_fails_closed_with_400():
@@ -431,14 +431,39 @@ def test_overlong_value_fails_closed_with_400():
     assert error.value.body()["reasons"] == ["pii_value_too_long"]
 
 
-def test_comb_of_api_keys_fails_closed_quickly(detector):
-    keys = ["sk-" + "x" * (16 + i) + "y" for i in range(600)]
+def test_comb_of_long_api_keys_fails_closed_quickly(detector):
+    keys = ["sk-" + "x" * (16 + 2 * i) + "y" for i in range(1000)]
+    assert max(map(len, keys)) <= PseudonymMap.MAX_VALUE_CHARS
     text = " ".join(keys)
+    masker = Pseudonymizer(detector, ["API_KEY"], [])
+    pseudonyms = PseudonymMap()
+    started = time.perf_counter()
+    masker.register(text, pseudonyms)
+    with pytest.raises(GuardrailError) as error:
+        masker.mask(text, pseudonyms)
+    assert error.value.body()["reasons"] == ["too_many_pii_values"]
+    assert time.perf_counter() - started < 1.5
+
+
+def test_comb_of_overlong_api_keys_fails_closed_quickly(detector):
+    text = " ".join("sk-" + "x" * (16 + 3 * i) + "y" for i in range(1000))
     started = time.perf_counter()
     with pytest.raises(GuardrailError) as error:
         Pseudonymizer(detector, ["API_KEY"], []).mask(text, PseudonymMap())
     assert error.value.body()["reasons"] == ["pii_value_too_long"]
     assert time.perf_counter() - started < 1.5
+
+
+def test_jwt_sized_value_is_masked_and_restored_in_content_but_not_arguments(detector):
+    jwt = "eyJ" + "a" * 600 + "." + "b" * 300 + "." + "c" * 295
+    assert len(jwt) == 1200
+    pseudonyms = PseudonymMap()
+    masker = Pseudonymizer(detector, ALL, [])
+    masked = masker.mask(f"token {jwt} 結束", pseudonyms)
+    assert masked == "token <API_KEY_1> 結束"
+    assert masker.mask(f"再次 {jwt}", pseudonyms) == "再次 <API_KEY_1>"
+    assert pseudonyms.restore(masked) == f"token {jwt} 結束"
+    assert pseudonyms.restore_json(json.dumps({"auth": "<API_KEY_1>"})) == '{"auth": "<API_KEY_1>"}'
 
 
 def test_trie_build_failure_fails_closed(monkeypatch):
