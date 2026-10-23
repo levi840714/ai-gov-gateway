@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from ai_gov_gateway.engine.guardrails.models import PiiSpan
+from ai_gov_gateway.engine.guardrails.models import GuardrailError, PiiSpan
 from ai_gov_gateway.engine.guardrails.pii import (
     PresidioDetector,
     Pseudonymizer,
@@ -365,3 +365,58 @@ def test_presidio_scan_drops_invalidated_matches():
     recognizer = Stub(patterns=[SimpleNamespace(score=0.8, regex=r"\w+\d")], global_regex_flags=0)
     spans = _PresidioScan(recognizer, 0.5).spans("EMAIL", "bad1 ok2")
     assert [(s.start, s.end) for s in spans] == [(5, 8)]
+
+
+def _phones(count: int) -> list[str]:
+    return [f"09{number:08d}" for number in range(count)]
+
+
+def test_many_distinct_values_stay_fast(detector):
+    phones = _phones(PseudonymMap.MAX_VALUES)
+    texts = [" ".join(phones[i : i + 20]) + " " + "字" * 3000 for i in range(0, len(phones), 20)]
+    assert sum(map(len, texts)) > 150_000
+    pseudonyms = PseudonymMap()
+    masker = Pseudonymizer(detector, ["PHONE"], [])
+    started = time.perf_counter()
+    for text in texts:
+        masker.register(text, pseudonyms)
+    masked = [masker.mask(text, pseudonyms) for text in texts]
+    assert time.perf_counter() - started < 1.5
+    assert not any("0900000" in text for text in masked)
+    assert pseudonyms.counts() == {"PHONE": PseudonymMap.MAX_VALUES}
+
+
+def test_too_many_distinct_values_fail_closed_with_400():
+    pseudonyms = PseudonymMap()
+    for phone in _phones(PseudonymMap.MAX_VALUES):
+        pseudonyms.token("PHONE", phone)
+    assert pseudonyms.token("PHONE", _phones(1)[0]) == "<PHONE_1>"
+    with pytest.raises(GuardrailError) as error:
+        pseudonyms.token("PHONE", "0999999999")
+    assert error.value.status == 400
+    assert error.value.body()["reasons"] == ["too_many_pii_values"]
+
+
+def test_known_value_pattern_is_cached_until_a_new_value_arrives():
+    pseudonyms = PseudonymMap()
+    pseudonyms.token("EMAIL", "a@example.com")
+    pseudonyms.occurrences("x")
+    cached = pseudonyms._known
+    pseudonyms.occurrences("y")
+    assert pseudonyms._known is cached
+    pseudonyms.token("EMAIL", "b@example.com")
+    assert pseudonyms._known is None
+
+
+def test_known_values_prefer_the_longest_match_and_handle_deep_nesting():
+    pseudonyms = PseudonymMap()
+    for value in ("0912345678", "09123456789"):
+        pseudonyms.token("PHONE", value)
+    [span] = pseudonyms.occurrences("x 09123456789 y")
+    assert (span.start, span.end) == (2, 13)
+    # 每個前綴都是一個值時分支層數等於長度，要退回逐值比對而不是失敗
+    nested = PseudonymMap()
+    for length in range(1, 1001):
+        nested.token("API_KEY", "k" * length)
+    [span] = nested.occurrences(" " + "k" * 1000 + " ")
+    assert (span.start, span.end) == (1, 1001)

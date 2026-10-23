@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from itertools import accumulate
 from typing import Any, Protocol
 
-from ai_gov_gateway.engine.guardrails.models import PiiSpan
+from ai_gov_gateway.engine.guardrails.models import GuardrailError, PiiSpan
 
 TOKEN = re.compile(r"<([A-Z][A-Z_]*?)_(\d+)>")
 # 這些類別的原值不能出現在 tool call 參數中：被注入的模型可藉此把真正的密鑰帶出去
@@ -222,8 +222,52 @@ def _bounded(value: str) -> str:
     return left + re.escape(value) + right
 
 
+_END = ""
+
+
+def _trie_pattern(values: Iterable[str]) -> re.Pattern[str]:
+    """把已登錄原值編成共用前綴的樹狀 regex；逐值的 alternation 會讓每個位置都試過全部的值。"""
+    root: dict[str, Any] = {}
+    for value in values:
+        node = root
+        for char in value:
+            node = node.setdefault(char, {})
+        node[_END] = True
+
+    def build(node: dict[str, Any], last: str) -> str:
+        literal = ""
+        while len(node) == 1 and _END not in node:
+            [(char, node)] = node.items()
+            literal += re.escape(char)
+            last = char
+        # 先試較長的分支、最後才是在此結束，因此同一位置取到最長且符合邊界的值
+        branches = [re.escape(c) + build(child, c) for c, child in sorted(node.items()) if c]
+        if _END in node:
+            branches.append(_R if last.isalnum() else "")
+        return literal + (branches[0] if len(branches) == 1 else "(?:" + "|".join(branches) + ")")
+
+    alnum = {c: child for c, child in root.items() if c.isalnum()}
+    others = {c: child for c, child in root.items() if not c.isalnum()}
+    parts = [re.escape(c) + build(child, c) for c, child in sorted(others.items())]
+    if alnum:
+        parts.append(_L + build(alnum, ""))
+    return re.compile("|".join(parts))
+
+
+def _known_pattern(values: set[str]) -> re.Pattern[str]:
+    try:
+        return _trie_pattern(values)
+    except (RecursionError, re.error):
+        # 分支層數過深時 regex 編譯會失敗，退回逐值比對（較慢但結果相同）
+        ordered = sorted(values, key=len, reverse=True)
+        return re.compile("|".join(map(_bounded, ordered)))
+
+
 class PseudonymMap:
     """單次請求的代號對照；只存在記憶體，不寫入稽核或日誌。"""
+
+    # 已登錄原值的比對成本是 文字長度 × 值的數量，上限讓最壞情況維持在一秒內
+    MAX_VALUES = 1000
 
     def __init__(self, reserved: dict[str, set[int]] | None = None) -> None:
         self._reserved = reserved or {}
@@ -231,7 +275,7 @@ class PseudonymMap:
         self._values: dict[str, str] = {}
         self._entities: dict[str, str] = {}
         self._next: dict[str, int] = {}
-        self._occurrence: re.Pattern[str] | None = None
+        self._known: tuple[re.Pattern[str], dict[str, str]] | None = None
 
     @classmethod
     def reserving(cls, texts: Iterable[str]) -> "PseudonymMap":
@@ -247,6 +291,8 @@ class PseudonymMap:
     def token(self, entity: str, value: str) -> str:
         key = (entity, value)
         if key not in self._tokens:
+            if len(self._tokens) >= self.MAX_VALUES:
+                raise GuardrailError(400, "too_many_pii_values")
             number = self._next.get(entity, 1)
             while number in self._reserved.get(entity, set()):
                 number += 1
@@ -255,23 +301,30 @@ class PseudonymMap:
             self._tokens[key] = token
             self._values[token] = value
             self._entities[token] = entity
-            self._occurrence = None
+            self._known = None
         return self._tokens[key]
 
     def occurrences(self, text: str) -> list[PiiSpan]:
         """text 中每一處獨立出現的已登錄原值（較長的優先），不含落在我們自己代號內的部分。"""
         if not self._values:
             return []
-        if self._occurrence is None:
-            values = sorted({value for _, value in self._tokens}, key=len, reverse=True)
-            self._occurrence = re.compile("|".join(map(_bounded, values)))
-        entity_of = {value: entity for entity, value in reversed(list(self._tokens))}
+        if self._known is None:
+            values = {value for _, value in self._tokens}
+            entity_of = {value: entity for entity, value in reversed(list(self._tokens))}
+            self._known = (_known_pattern(values), entity_of)
+        pattern, entity_of = self._known
         own = [m.span() for m in TOKEN.finditer(text) if m.group(0) in self._values]
-        return [
-            PiiSpan(entity=entity_of[m.group(0)], start=m.start(), end=m.end())
-            for m in self._occurrence.finditer(text)
-            if not any(m.start() < end and start < m.end() for start, end in own)
-        ]
+        starts = [start for start, _ in own]
+        ends = [end for _, end in own]
+        found = []
+        for match in pattern.finditer(text):
+            inside = bisect_left(starts, match.end())
+            if inside and ends[inside - 1] > match.start():
+                continue
+            found.append(
+                PiiSpan(entity=entity_of[match.group(0)], start=match.start(), end=match.end())
+            )
+        return found
 
     def counts(self) -> dict[str, int]:
         return dict(Counter(self._entities.values()))
