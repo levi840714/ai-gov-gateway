@@ -98,3 +98,27 @@ def test_empty_values_carry_nothing_and_pass():
 
 def test_field_names_that_could_hold_content_are_not_echoed():
     assert _field({"model": "m", "messages": MESSAGES, PII: 1}) == "?"
+
+
+IMAGE = "https://img.example.com/a.png"
+
+
+@pytest.mark.parametrize("detail", [None, "low", "high", "auto"])
+def test_image_parts_with_url_and_detail_pass(detail):
+    image = {"url": IMAGE} if detail is None else {"url": IMAGE, "detail": detail}
+    message = {"role": "user", "content": [{"type": "image_url", "image_url": image}]}
+    check_request({"model": "m", "messages": [message]}, {"messages": [message]})
+
+
+@pytest.mark.parametrize(
+    "image, field",
+    [
+        (IMAGE, "messages.content.image_url.image_url"),
+        ({"detail": "low"}, "messages.content.image_url.image_url"),
+        ({"url": IMAGE, "detail": PII}, "messages.content.image_url.image_url.detail"),
+        ({"url": IMAGE, "alt": PII}, "messages.content.image_url.image_url.alt"),
+    ],
+)
+def test_image_parts_reject_other_shapes(image, field):
+    message = {"role": "user", "content": [{"type": "image_url", "image_url": image}]}
+    assert _field({"model": "m", "messages": [message]}) == field

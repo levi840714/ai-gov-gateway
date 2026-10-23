@@ -146,10 +146,20 @@ def test_spotlight_escapes_boundary_variants(variant):
 
 
 def test_source_files_contain_no_invisible_characters():
-    for path in (Path("src/ai_gov_gateway/engine/guardrails/injection.py"), Path(__file__), RULES):
+    # 規則與測試資料裡看不見的字元在 review 時看不出來；需要時一律寫成 \u 跳脫
+    root = Path(__file__).resolve().parents[1]
+    paths = [
+        path
+        for folder in ("src", "tests", "guardrails")
+        for path in sorted((root / folder).rglob("*"))
+        if path.is_file() and "__pycache__" not in path.parts
+    ]
+    assert len(paths) > 20
+    for path in paths:
         text = path.read_text(encoding="utf-8")
         assert HIDDEN.search(text) is None, path
-        assert [c for c in text if unicodedata.category(c) in {"Cf", "Cc"} and c != "\n"] == []
+        hidden = [c for c in text if unicodedata.category(c) in {"Cf", "Cc"} and c != "\n"]
+        assert hidden == [], path
 
 
 ADVERSARIAL = [

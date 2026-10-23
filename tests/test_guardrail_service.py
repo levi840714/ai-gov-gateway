@@ -133,7 +133,7 @@ async def test_flag_keeps_content_and_audits():
 
 async def test_hidden_characters_are_stripped_but_not_denied():
     guardrail, _, store, _ = _guardrail(guardrail_config(action="deny"))
-    guarded = await _guard(guardrail, _tool_turn("正常​內容"))
+    guarded = await _guard(guardrail, _tool_turn("正常\u200b內容"))
     assert guarded.messages[-1]["content"] == spotlight("get_counterparties", "正常內容")
     event = store.audit[-1]
     assert (event.decision, event.reasons) == ("flag", ["hidden.chars"])

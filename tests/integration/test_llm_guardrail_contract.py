@@ -10,6 +10,7 @@ import pytest
 from ai_gov_gateway.engine.guardrails.injection import REDACTED, spotlight
 from scripts.env import KEYS_FILE, LITELLM_URL, env
 from scripts.llm_sim import PROBE_URL, chat, clear_probe, probe_requests, stream_text, tool_turn
+from scripts.make_keys import LLM_ROUTES
 
 pytestmark = pytest.mark.integration
 TW_ID = "A123456789"
@@ -143,29 +144,35 @@ def test_message_names_are_pseudonymized():
 
 def test_tpm_limit_returns_429():
     # 每次建立新 key：tpm 以分鐘計，沿用舊 key 會受上一次測試影響
+    master = {"Authorization": f"Bearer {env('LITELLM_MASTER_KEY')}"}
     created = httpx.post(
         f"{LITELLM_URL}/key/generate",
-        headers={"Authorization": f"Bearer {env('LITELLM_MASTER_KEY')}"},
+        headers=master,
         json={
             "key_alias": f"guard-tpm-{uuid.uuid4().hex[:8]}",
             "models": ["probe-primary"],
             "tpm_limit": 1000,
-            "allowed_routes": ["/v1/chat/completions", "/chat/completions"],
+            **LLM_ROUTES,
         },
         timeout=30,
     )
     created.raise_for_status()
     key = created.json()["key"]
     messages = [{"role": "system", "content": "probe:usage=5000"}, {"role": "user", "content": "x"}]
-    statuses = [
+    try:
+        statuses = [
+            httpx.post(
+                f"{LITELLM_URL}/v1/chat/completions",
+                headers={"Authorization": f"Bearer {key}"},
+                json={"model": "probe-primary", "messages": messages},
+                timeout=30,
+            ).status_code
+            for _ in range(3)
+        ]
+    finally:
         httpx.post(
-            f"{LITELLM_URL}/v1/chat/completions",
-            headers={"Authorization": f"Bearer {key}"},
-            json={"model": "probe-primary", "messages": messages},
-            timeout=30,
-        ).status_code
-        for _ in range(3)
-    ]
+            f"{LITELLM_URL}/key/delete", headers=master, json={"keys": [key]}, timeout=30
+        ).raise_for_status()
     # A8：tpm 依已完成的請求累計，第一次放行、之後超過上限
     assert statuses == [200, 429, 429]
 

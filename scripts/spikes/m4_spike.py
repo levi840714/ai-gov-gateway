@@ -11,6 +11,7 @@ from typing import Any
 import httpx
 
 from scripts.env import KEYS_FILE, LITELLM_URL, env
+from scripts.make_keys import LLM_ROUTES
 
 PROBE = "http://127.0.0.1:8300"
 KEYS: dict[str, str] = json.loads(KEYS_FILE.read_text())
@@ -146,16 +147,32 @@ def check_embeddings(key: str) -> None:
 
 
 def check_primary_only_key() -> None:
+    master = {"Authorization": f"Bearer {env('LITELLM_MASTER_KEY')}"}
     generated = httpx.post(
         f"{LITELLM_URL}/key/generate",
-        headers={"Authorization": f"Bearer {env('LITELLM_MASTER_KEY')}"},
-        json={"key_alias": f"spike-primary-only-{int(time.time())}", "models": ["probe-primary"]},
+        headers=master,
+        json={
+            "key_alias": f"spike-primary-only-{int(time.time())}",
+            "models": ["probe-primary"],
+            **LLM_ROUTES,
+        },
         timeout=30,
-    ).json()
-    KEYS["spike-primary-only"] = generated["key"]
-    clear()
-    response = chat("spike-primary-only", "probe:reply=ok", "probe:fail=probe-primary", user="x")
-    models = [r["model"] for r in recorded()]
+    )
+    generated.raise_for_status()
+    KEYS["spike-primary-only"] = generated.json()["key"]
+    try:
+        clear()
+        response = chat(
+            "spike-primary-only", "probe:reply=ok", "probe:fail=probe-primary", user="x"
+        )
+        models = [r["model"] for r in recorded()]
+    finally:
+        httpx.post(
+            f"{LITELLM_URL}/key/delete",
+            headers=master,
+            json={"keys": [KEYS.pop("spike-primary-only")]},
+            timeout=30,
+        ).raise_for_status()
     report(
         "A7 key 只列主力模型時 fallback 的結果",
         response.status_code == 200 and models[-1:] == ["probe-fallback"],

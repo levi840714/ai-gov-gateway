@@ -1,6 +1,7 @@
 """chat 請求的欄位白名單：guardrail 只遮蔽訊息內容與 tool 參數，其他欄位會原樣送給 provider。
 
-tools、response_format 的 schema 與 stop 由開發者定義，允許但不遮蔽（已知限制）。
+tools、response_format 的 schema 與 stop 由開發者定義，允許但不遮蔽；圖片 URL 也不遮蔽。
+這些都是已知限制。
 """
 
 import re
@@ -51,6 +52,8 @@ MESSAGE_FIELDS = frozenset({"role", "content", "name", "tool_calls", "tool_call_
 TOOL_CALL_FIELDS = frozenset({"id", "type", "function"})
 FUNCTION_FIELDS = frozenset({"name", "arguments"})
 PART_FIELDS = {"text": frozenset({"type", "text"}), "image_url": frozenset({"type", "image_url"})}
+IMAGE_FIELDS = frozenset({"url", "detail"})
+IMAGE_DETAILS = frozenset({"low", "high", "auto"})
 # 錯誤只回欄位名稱；名稱也來自 client，不像欄位名稱時不回傳，以免把內容帶進回應與日誌
 _FIELD_NAME = re.compile(r"[a-z_]{1,40}")
 
@@ -79,6 +82,8 @@ def _check_message(message: Mapping[str, Any]) -> None:
             if not isinstance(part, Mapping) or kind not in PART_FIELDS:
                 raise _unsupported("messages.content.", kind)
             _only(part, PART_FIELDS[kind], f"messages.content.{kind}.")
+            if kind == "image_url":
+                _check_image(part.get("image_url"))
     elif content is not None and not isinstance(content, str):
         raise _unsupported("messages.", "content")
     calls = message.get("tool_calls")
@@ -88,6 +93,15 @@ def _check_message(message: Mapping[str, Any]) -> None:
             function = call.get("function")
             if isinstance(function, Mapping):
                 _only(function, FUNCTION_FIELDS, "messages.tool_calls.function.")
+
+
+def _check_image(image: Any) -> None:
+    prefix = "messages.content.image_url."
+    if not isinstance(image, Mapping) or not isinstance(image.get("url"), str):
+        raise _unsupported(prefix, "image_url")
+    _only(image, IMAGE_FIELDS, f"{prefix}image_url.")
+    if image.get("detail") is not None and image.get("detail") not in IMAGE_DETAILS:
+        raise _unsupported(f"{prefix}image_url.", "detail")
 
 
 def _only(fields: Mapping[str, Any], allowed: frozenset[str], prefix: str) -> None:

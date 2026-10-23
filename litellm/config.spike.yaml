@@ -1,3 +1,5 @@
+# M4 實作前的驗證用（docs/spikes/m4-findings.md），保留以便重現；一般執行不要使用
+# 停在驗證當時的 config.yaml：沒有 kyt-main 的 fallback，llm-guardrail 換成 SpikeGuardrail（不做治理）
 model_list:
   - model_name: kyt-main
     litellm_params:
