@@ -1,4 +1,5 @@
 import json
+import random
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -438,18 +439,18 @@ def test_comb_of_long_api_keys_fails_closed_quickly(detector):
     masker = Pseudonymizer(detector, ["API_KEY"], [])
     pseudonyms = PseudonymMap()
     started = time.perf_counter()
-    masker.register(text, pseudonyms)
     with pytest.raises(GuardrailError) as error:
+        masker.register(text, pseudonyms)
         masker.mask(text, pseudonyms)
     assert error.value.body()["reasons"] == ["too_many_pii_values"]
     assert time.perf_counter() - started < 1.5
 
 
-def test_comb_of_overlong_api_keys_fails_closed_quickly(detector):
-    text = " ".join("sk-" + "x" * (16 + 3 * i) + "y" for i in range(1000))
+def test_overlong_key_among_others_fails_closed_quickly(detector):
+    keys = ["sk-" + "x" * 20 + str(i) for i in range(5)] + ["sk-" + "x" * 3000]
     started = time.perf_counter()
     with pytest.raises(GuardrailError) as error:
-        Pseudonymizer(detector, ["API_KEY"], []).mask(text, PseudonymMap())
+        Pseudonymizer(detector, ["API_KEY"], []).mask(" ".join(keys), PseudonymMap())
     assert error.value.body()["reasons"] == ["pii_value_too_long"]
     assert time.perf_counter() - started < 1.5
 
@@ -476,3 +477,79 @@ def test_trie_build_failure_fails_closed(monkeypatch):
     with pytest.raises(GuardrailError) as error:
         pseudonyms.occurrences("a@example.com")
     assert error.value.body()["reasons"] == ["too_many_pii_values"]
+
+
+def test_wide_trie_of_long_random_keys_fails_closed_before_compiling(detector):
+    rng = random.Random(7)
+    alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
+    texts = [
+        " ".join("sk-" + "".join(rng.choices(alphabet, k=900)) for _ in range(20))
+        for _ in range(50)
+    ]
+    masker = Pseudonymizer(detector, ["API_KEY"], [])
+    pseudonyms = PseudonymMap()
+    started = time.perf_counter()
+    with pytest.raises(GuardrailError) as error:
+        for text in texts:
+            masker.register(text, pseudonyms)
+        for text in texts:
+            masker.mask(text, pseudonyms)
+    assert error.value.body()["reasons"] == ["too_many_pii_values"]
+    assert pseudonyms._known is None
+    assert time.perf_counter() - started < 1.0
+
+
+def test_total_value_size_is_capped_but_the_cap_itself_fits():
+    pseudonyms = PseudonymMap()
+    size = PseudonymMap.MAX_TOTAL_VALUE_CHARS // 32
+    for number in range(32):
+        pseudonyms.token("API_KEY", f"{number:02d}".ljust(size, "k"))
+    with pytest.raises(GuardrailError) as error:
+        pseudonyms.token("API_KEY", "x")
+    assert error.value.body()["reasons"] == ["too_many_pii_values"]
+    assert pseudonyms.token("API_KEY", "00".ljust(size, "k")) == "<API_KEY_1>"
+
+
+def test_realistic_mix_of_values_still_works(detector):
+    texts = [
+        f"user{i}@example.com 0912{i:06d} 帳號 {i:013d} A123456789 卡號 4111 1111 1111 1111"
+        for i in range(200)
+    ]
+    masker = Pseudonymizer(detector, ALL, [])
+    pseudonyms = PseudonymMap()
+    started = time.perf_counter()
+    for text in texts:
+        masker.register(text, pseudonyms)
+    masked = [masker.mask(text, pseudonyms) for text in texts]
+    assert time.perf_counter() - started < 1.0
+    assert all("@example.com" not in text and "4111" not in text for text in masked)
+    assert [pseudonyms.restore(m) for m in masked] == texts
+
+
+def test_discard_cache_keeps_restore_working_and_allows_rebuild():
+    pseudonyms = PseudonymMap()
+    token = pseudonyms.token("EMAIL", "a@example.com")
+    assert len(pseudonyms.occurrences("a@example.com")) == 1
+    assert pseudonyms._known is not None
+    pseudonyms.discard_cache()
+    assert pseudonyms._known is None
+    assert pseudonyms.restore(f"to {token}") == "to a@example.com"
+    assert pseudonyms.restore_json(json.dumps({"to": token})) == '{"to": "a@example.com"}'
+    assert pseudonyms.counts() == {"EMAIL": 1}
+    assert len(pseudonyms.occurrences("a@example.com")) == 1
+
+
+def test_deep_comb_within_the_total_cap_is_handled_quickly(detector):
+    keys = ["sk-" + "x" * (16 + i) + "y" for i in range(0, 330, 2)]
+    assert sum(map(len, keys)) < PseudonymMap.MAX_TOTAL_VALUE_CHARS
+    text = " ".join(keys)
+    masker = Pseudonymizer(detector, ["API_KEY"], [])
+    pseudonyms = PseudonymMap()
+    started = time.perf_counter()
+    masker.register(text, pseudonyms)
+    try:
+        masked = masker.mask(text, pseudonyms)
+        assert "x" not in masked
+    except GuardrailError as error:
+        assert error.code == "too_many_pii_values"
+    assert time.perf_counter() - started < 1.5

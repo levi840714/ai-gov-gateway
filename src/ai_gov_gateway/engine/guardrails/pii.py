@@ -262,6 +262,8 @@ class PseudonymMap:
     MAX_VALUES = 1000
     # 涵蓋常見的 JWT；過深的前綴樹在編譯時會失敗並拒絕請求
     MAX_VALUE_CHARS = 2048
+    # 前綴樹的編譯時間與記憶體隨所有值的總長度成長；各值互不相同時幾乎沒有共用前綴
+    MAX_TOTAL_VALUE_CHARS = 65_536
 
     def __init__(self, reserved: dict[str, set[int]] | None = None) -> None:
         self._reserved = reserved or {}
@@ -270,6 +272,7 @@ class PseudonymMap:
         self._entities: dict[str, str] = {}
         self._next: dict[str, int] = {}
         self._known: tuple[re.Pattern[str], dict[str, str]] | None = None
+        self._total_chars = 0
 
     @classmethod
     def reserving(cls, texts: Iterable[str]) -> "PseudonymMap":
@@ -287,8 +290,10 @@ class PseudonymMap:
         if key not in self._tokens:
             if len(value) > self.MAX_VALUE_CHARS:
                 raise GuardrailError(400, "pii_value_too_long")
-            if len(self._tokens) >= self.MAX_VALUES:
+            too_many = len(self._tokens) >= self.MAX_VALUES
+            if too_many or self._total_chars + len(value) > self.MAX_TOTAL_VALUE_CHARS:
                 raise GuardrailError(400, "too_many_pii_values")
+            self._total_chars += len(value)
             number = self._next.get(entity, 1)
             while number in self._reserved.get(entity, set()):
                 number += 1
@@ -299,6 +304,10 @@ class PseudonymMap:
             self._entities[token] = entity
             self._known = None
         return self._tokens[key]
+
+    def discard_cache(self) -> None:
+        """丟掉編譯好的比對樹，只留代號與原值；之後若再比對會重新建立。"""
+        self._known = None
 
     def occurrences(self, text: str) -> list[PiiSpan]:
         """text 中每一處獨立出現的已登錄原值（較長的優先），不含落在我們自己代號內的部分。"""
