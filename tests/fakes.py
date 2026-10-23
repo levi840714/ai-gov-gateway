@@ -1,8 +1,10 @@
+import re
 from datetime import UTC, datetime, timedelta
 from itertools import count
 from typing import Any
 
 from ai_gov_gateway.engine.audit import GENESIS_HASH, build_record
+from ai_gov_gateway.engine.guardrails.models import GuardrailConfig, PiiSpan
 from ai_gov_gateway.engine.models import (
     Approval,
     ApprovalStatus,
@@ -135,3 +137,52 @@ class FakePolicy:
         if self.error is not None:
             raise PolicyError(self.error)
         return self.decision
+
+
+GUARDRAIL_CONFIG: dict[str, Any] = {
+    "agent_status": "active",
+    "pii": {"entities": ["EMAIL"], "exclude": ["eth_address"]},
+    "injection": {"action": "redact", "system_notice": False},
+    "high_risk_tools": ["file_str"],
+    "policy_version": "test-1",
+}
+
+
+def guardrail_config(**updates: Any) -> GuardrailConfig:
+    data = dict(GUARDRAIL_CONFIG)
+    for key, value in updates.items():
+        if key in ("action", "system_notice"):
+            data["injection"] = {**data["injection"], key: value}
+        else:
+            data[key] = value
+    return GuardrailConfig.model_validate(data)
+
+
+class FakeGuardrailPolicy:
+    def __init__(self, config: GuardrailConfig | None = None) -> None:
+        self.config = config or guardrail_config()
+        self.error: str | None = None
+        self.agents: list[str] = []
+
+    async def llm_config(self, agent_id: str) -> GuardrailConfig:
+        self.agents.append(agent_id)
+        if self.error is not None:
+            raise PolicyError(self.error)
+        return self.config
+
+
+class FakePiiDetector:
+    """只認得字面上的 email，讓 service 的測試不依賴 Presidio。"""
+
+    def __init__(self) -> None:
+        self.fail: Exception | None = None
+
+    def detect(self, text: str, entities: list[str]) -> list[PiiSpan]:
+        if self.fail is not None:
+            raise self.fail
+        if "EMAIL" not in entities:
+            return []
+        return [
+            PiiSpan(entity="EMAIL", start=m.start(), end=m.end())
+            for m in re.finditer(r"[a-z]+@example\.com", text)
+        ]
