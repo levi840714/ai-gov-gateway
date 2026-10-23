@@ -1,12 +1,13 @@
 {
-  "rules_version": "2026-10-23.1",
+  "rules_version": "2026-10-23.2",
   "rules": [
-    {"id": "override.zh", "pattern": "(?:忽略|無視|忘記|不要理會)(?:所有|一切|全部)?(?:的)?(?:先前|之前|以上|上述|前面|原本|原先)(?:的|所有)?(?:指示|指令|規則|提示|設定|要求)"},
-    {"id": "override.zh_role", "pattern": "(?:你現在是|從現在(?:起|開始)你是|你的新(?:角色|任務|指示)(?:是|：|:))"},
-    {"id": "override.en", "pattern": "(?i)\\b(?:ignore|disregard|forget|override)\\s+(?:all\\s+|any\\s+)?(?:of\\s+)?(?:the\\s+|your\\s+)?(?:previous|prior|above|earlier|preceding|original)\\s+(?:instructions?|prompts?|rules|directions)"},
-    {"id": "override.en_role", "pattern": "(?i)(?:\\byou\\s+are\\s+now\\b|\\bnew\\s+instructions?\\s*:|\\bsystem\\s+prompt\\s*:)"},
-    {"id": "role.marker", "pattern": "(?im)(?:^\\s*(?:system|assistant|developer)\\s*:|<\\|im_(?:start|end)\\|>|\\[/?INST\\]|</?\\s*system\\s*>)"},
-    {"id": "toolcall.json", "pattern": "(?:\"tool_calls\"\\s*:|\\{\\s*\"name\"\\s*:\\s*\"[^\"]{1,64}\"\\s*,\\s*\"arguments\"\\s*:)"}
+    {"id": "override.zh", "pattern": "(?:忽略|無視|忘記|不要理會)(?:所有|一切|全部)?(?:的)?(?:先前|之前|以上|上述|上面|前述|前面|原本|原先)(?:所有|一切|全部)?(?:的)?(?:指示|指令|規則|提示|設定|要求)"},
+    {"id": "override.zh_role", "pattern": "(?i)(?:(?:你現在是(?!否)|從現在(?:起|開始)你是)(?:一個|一位|個|位)?(?:[^，。,.\\n]{0,10}?的)?(?:助手|助理|AI|人工智慧|機器人|角色|系統|管理員|開發者|DAN)|你的新(?:角色|任務|指示)(?:是|：|:))"},
+    {"id": "override.en", "pattern": "(?i)\\b(?:ignore|disregard|forget|override)\\s+(?:all\\s+|any\\s+)?(?:of\\s+)?(?:the\\s+|your\\s+)?(?:(?:previous|prior|above|earlier|preceding|original)\\s+(?:instructions?|prompts?|rules|directions)|(?:instructions?|prompts?|rules|directions)\\s+(?:above|before))"},
+    {"id": "override.en_role", "pattern": "(?i)(?:\\byou\\s+are\\s+now\\s+(?:a|an|dan|the\\s+new|my|no\\s+longer)\\b|\\bnew\\s+instructions?\\s*:|\\bsystem\\s+prompt\\s*:)"},
+    {"id": "role.marker", "pattern": "(?im)(?:^[ \\t]*(?:system|assistant|developer)[ \\t]*:|<\\|im_(?:start|end)\\|>|\\[/?inst\\]|</?[ \\t]*system[ \\t]*>)"},
+    {"id": "role.boundary", "pattern": "(?i)<<(?:\\s*/)?\\s*tool_output"},
+    {"id": "toolcall.json", "pattern": "(?:\"tool_calls\"\\s*:|\\{\\s*\"name\"\\s*:\\s*\"[^\"]{1,64}\"\\s*,\\s*\"(?:arguments|parameters)\"\\s*:)"}
   ],
   "tool_verbs": ["呼叫", "執行", "調用", "使用工具", "call", "invoke", "execute", "run", "use"]
 }

@@ -5,8 +5,11 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
-# 零寬字元、雙向控制字元與 Unicode tag 字元：肉眼看不到，常用來藏指令或打斷規則比對
-HIDDEN = re.compile("[​-‍⁠﻿‪-‮⁦-⁩\U000e0000-\U000e007f]")
+# 零寬、雙向控制、Unicode tag、變體選擇與填充類字元：肉眼看不到，常用來藏指令或打斷規則比對
+HIDDEN = re.compile(
+    "[\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180f\u200b-\u200f\u202a-\u202e"
+    "\u2060-\u2064\u2066-\u2069\u3164\ufeff\uffa0\U000e0000-\U000e007f\U000e0100-\U000e01ef]"
+)
 BOUNDARY_OPEN = "<<tool_output"
 BOUNDARY_CLOSE = "<</tool_output>>"
 SYSTEM_NOTICE = (
@@ -15,6 +18,7 @@ SYSTEM_NOTICE = (
 )
 REDACTED = "[gateway] 此工具結果疑似含指令，已移除（規則 {rules}）"
 _NAME = re.compile(r"[^A-Za-z0-9_.-]")
+_BOUNDARY = re.compile(r"(?i)<<(\s*/)?\s*tool_output")
 
 
 def normalize(text: str) -> tuple[str, bool]:
@@ -24,10 +28,11 @@ def normalize(text: str) -> tuple[str, bool]:
 
 
 def spotlight(name: str, content: str) -> str:
+    """content 必須已經過 normalize()，否則變體寫法的邊界字串逃得過跳脫。"""
     safe = _NAME.sub("", name)[:64] or "unknown"
-    # 先處理結尾邊界：內容不能提前關閉或另開一段邊界
-    escaped = content.replace("<</tool_output", "<</tool_output_escaped").replace(
-        BOUNDARY_OPEN, "<<tool_output_escaped"
+    # 內容不能提前關閉邊界或另開一段，大小寫與空白變體一併跳脫
+    escaped = _BOUNDARY.sub(
+        lambda m: "<<" + ("/" if m.group(1) else "") + "tool_output_escaped", content
     )
     return f'{BOUNDARY_OPEN} name="{safe}">>\n{escaped}\n{BOUNDARY_CLOSE}'
 
@@ -69,6 +74,12 @@ class RuleDetector:
 def _tool_name_pattern(verbs: tuple[str, ...], tools: tuple[str, ...]) -> re.Pattern[str] | None:
     if not verbs or not tools:
         return None
-    verb = "|".join(re.escape(v) for v in verbs)
+    # 英文動詞前不能緊接字母（reuse、rerun）；間隔設上限，避免空白灌爆造成 ReDoS
+    verb = "|".join(
+        ("(?<![A-Za-z])" if v[:1].isascii() and v[:1].isalpha() else "") + re.escape(v)
+        for v in verbs
+    )
     tool = "|".join(re.escape(t) for t in tools)
-    return re.compile(rf"(?i)(?:{verb})\s*(?:the\s+)?[`'\"「]?\s*(?:{tool})(?![A-Za-z0-9_])")
+    return re.compile(
+        rf"(?i)(?:{verb})[ \t]{{0,3}}(?:the[ \t]+)?[`'\"「]?[ \t]{{0,2}}(?:{tool})(?![A-Za-z0-9_])"
+    )
