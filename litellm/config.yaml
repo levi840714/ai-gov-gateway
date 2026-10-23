@@ -60,3 +60,9 @@ guardrails:
       guardrail: ai_gov_gateway.plugin.GovernanceGuardrail
       mode: pre_mcp_call
       default_on: true
+  - guardrail_name: llm-guardrail
+    litellm_params:
+      # chat completions 的注入防護與 PII 假名化；非 chat 的呼叫一律拒絕
+      guardrail: ai_gov_gateway.plugin.LlmGuardrailHook
+      mode: [pre_call, post_call]
+      default_on: true

@@ -45,3 +45,12 @@ def test_rejects_non_positive_ttl(monkeypatch):
 def test_repr_hides_database_url(monkeypatch):
     monkeypatch.setenv("GOV_DATABASE_URL", "postgresql://u:secret@h/db")
     assert "secret" not in repr(Settings())
+
+
+def test_guardrail_settings_defaults(monkeypatch):
+    for key in [k for k in os.environ if k.startswith("GOV_")]:
+        monkeypatch.delenv(key)
+    settings = Settings()
+    assert settings.guardrail_max_chars == 200_000
+    assert settings.guardrail_max_total_chars == 1_000_000
+    assert settings.guardrail_rules_path.endswith("guardrails/injection_rules.json")

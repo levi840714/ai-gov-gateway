@@ -17,3 +17,7 @@ class Settings(BaseSettings):
     oidc_allowed_clients: list[str] = Field(default=["kyt-cli", "agw-cli"], min_length=1)
     approval_ttl_hours: int = Field(default=24, gt=0)
     approver_role: str = "compliance_supervisor"
+    guardrail_rules_path: str = "/opt/ai-gov-gateway/guardrails/injection_rules.json"
+    # 單則訊息與整個請求的掃描上限；超過時拒絕而不截斷，避免沒掃到的部分被放行
+    guardrail_max_chars: int = Field(default=200_000, gt=0)
+    guardrail_max_total_chars: int = Field(default=1_000_000, gt=0)

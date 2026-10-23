@@ -1,4 +1,5 @@
 from datetime import timedelta
+from pathlib import Path
 
 import pytest
 from fastapi import FastAPI
@@ -7,10 +8,20 @@ from fastapi.testclient import TestClient
 from ai_gov_gateway.api.approvals import router
 from ai_gov_gateway.engine.approvals import ApprovalService
 from ai_gov_gateway.engine.engine import GovernanceEngine
+from ai_gov_gateway.engine.guardrails.injection import RuleDetector
+from ai_gov_gateway.engine.guardrails.service import LlmGuardrail
 from ai_gov_gateway.engine.models import Decision, ToolCall
 from ai_gov_gateway.engine.store import StoreError, StoreUnavailable
 from ai_gov_gateway.runtime import Services, get_services
-from tests.fakes import FakeClock, FakePolicy, InMemoryStore, id_sequence, policy_result
+from tests.fakes import (
+    FakeClock,
+    FakeGuardrailPolicy,
+    FakePiiDetector,
+    FakePolicy,
+    InMemoryStore,
+    id_sequence,
+    policy_result,
+)
 from tests.jwt_helpers import alice_token, bob_token, carol_token, make_token, make_verifier
 
 
@@ -33,7 +44,16 @@ def services(store: InMemoryStore) -> Services:
         new_id=id_sequence(),
     )
     approvals = ApprovalService(store=store, approver_role="compliance_supervisor", clock=clock)
-    return Services(verifier=verifier, engine=engine, approvals=approvals)
+    llm_guardrail = LlmGuardrail(
+        policy=FakeGuardrailPolicy(),
+        store=store,
+        detector=FakePiiDetector(),
+        rules=RuleDetector.from_file(Path("guardrails/injection_rules.json")),
+        max_chars=1000,
+    )
+    return Services(
+        verifier=verifier, engine=engine, approvals=approvals, llm_guardrail=llm_guardrail
+    )
 
 
 @pytest.fixture
