@@ -1,0 +1,8 @@
+# 驗證 fallback 時疊加：主力 kyt-main 一律 503，所有請求改由 gpt-6-luna 回應
+services:
+  probe_llm:
+    environment:
+      PROBE_FAIL_MODELS: kyt-main
+  gateway:
+    volumes:
+      - ./litellm/config.fallback.yaml:/app/config.yaml:ro
