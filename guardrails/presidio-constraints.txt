@@ -1,0 +1,24 @@
+# presidio-analyzer 在 LiteLLM v1.105.1 映像中新增的套件（pip freeze 前後比對）
+# 只鎖新增的套件；venv 既有的版本由映像決定，不在此列出
+blis==1.3.3
+catalogue==2.0.10
+cloudpathlib==0.26.0
+confection==1.3.3
+cymem==2.0.13
+murmurhash==1.0.15
+phonenumbers==9.0.41
+preshed==3.0.13
+presidio-analyzer==2.2.364
+requests-file==3.0.1
+setuptools==84.2.1
+shellingham==1.5.4
+smart-open==8.0.4
+spacy==3.8.16
+spacy-legacy==3.0.12
+spacy-loggers==1.0.5
+srsly==2.5.4
+thinc==8.3.13
+tldextract==5.4.0
+typer==0.27.3
+wasabi==1.1.3
+weasel==1.0.0

@@ -11,13 +11,13 @@ docker compose up -d --force-recreate gateway   # 還原
 ```
 
 hook 的觀察來自 `scripts/spikes/m4_hook_probe.py` 寫的 `M4SPIKE` 日誌（含跨 hook 的遞增序號 `seq`）；以下只摘錄結論，不貼日誌原文。
-spec §4 的 S2–S5 分別對應 A2、A3、A4（含 A1 的 `call_type`）、A8。
+spec §4 的 S1–S5 對應下表：S1 為「S1 / Presidio 打包」與「S1 / tldextract」，S2–S5 分別對應 A2、A3、A4（含 A1 的 `call_type`）、A8；計畫標頭提到的「S6」指「其他觀察」中額外的 hook 檢查（streaming 與 success hook 的順序、MCP、failure hook 等）。
 
 ## 結論
 
 | 編號 | 結論 | 觀察 |
 | ---- | ---- | ---- |
-| S1 / Presidio 打包 | 通過 | 映像為 Wolfi（glibc 2.44）、Python 3.13.16、venv `/app/.venv`，有 `ensurepip`（pip 26.2.1）；pydantic 2.13.4、numpy 2.4.4 符合 presidio 的需求。採 `ensurepip` → `pip install presidio-analyzer==2.2.364`（2026-07-22 發布）→ 移除 pip。`pip freeze` 前後比對：既有套件版本完全不變，只新增 spaCy 3.8.16、thinc、tldextract 5.4.0、phonenumbers 等（不含任何 spaCy 語言模型），`pip check` 無衝突。映像 1.73 GB → 2.03 GB（壓縮後 411 MB → 469 MB，+58 MB）。容器內 `EmailRecognizer` / `CreditCardRecognizer` 的 `analyze(text, entities, None)` 印出 `['EMAIL_ADDRESS']`、`['CREDIT_CARD']`；M2 整合測試 17 passed、`demo_m2` 13/13 |
+| S1 / Presidio 打包 | 通過 | 映像為 Wolfi（glibc 2.44）、Python 3.13.16、venv `/app/.venv`，有 `ensurepip`（pip 26.2.1）；pydantic 2.13.4、numpy 2.4.4 符合 presidio 的需求。採 `ensurepip` → `pip install presidio-analyzer==2.2.364`（2026-07-22 發布）→ 移除 pip。`pip freeze` 前後比對：既有套件版本完全不變，只新增 spaCy 3.8.16、thinc、tldextract 5.4.0、phonenumbers 等（不含任何 spaCy 語言模型），`pip check` 無衝突。映像 1.73 GB → 2.03 GB（壓縮後 411 MB → 469 MB，+58 MB）。容器內 `EmailRecognizer` / `CreditCardRecognizer` 的 `analyze(text, entities, None)` 印出 `['EMAIL_ADDRESS']`、`['CREDIT_CARD']`；M2 整合測試 17 passed、`demo_m2` 13/13。Presidio 新增的 22 個套件已以 `guardrails/presidio-constraints.txt` 鎖定版本（`pip install -c`），重建後以 `importlib.metadata` 比對，套件與版本與驗證時相同 |
 | S1 / tldextract | 通過，但需處理 | `import presidio_analyzer` 約 1 秒（會載入 spaCy 套件）。`EmailRecognizer` 第一次驗證網域時，tldextract 會向 `publicsuffix.org` 下載 Public Suffix List（gateway 可連外：0.32 秒，之後快取在 `/root/.cache/python-tldextract`）；`--network none` 與 internal 網路下 DNS 立即失敗，退回內建 snapshot（0.05 秒，不會卡住），但會印出兩段 traceback。下載未設 timeout（`TLDEXTRACT_CACHE_TIMEOUT` 未設），網路黑洞時可能卡住。改成 `tldextract.tldextract.TLD_EXTRACTOR = TLDExtract(suffix_list_urls=())` 後只用 snapshot，離線 0.045 秒、無 traceback、結果相同 |
 | A1 | 成立（只有 `"acompletion"`） | chat 不論 streaming 與否 `call_type` 都是 `"acompletion"`；embeddings 也會經過 `pre_call`，`call_type` 是 `"aembedding"`。MCP tool call **不會**呼叫 `mode: pre_call` guardrail 的 `async_pre_call_hook`（跑 `demo_m2` 期間沒有任何 `pre_call` 紀錄） |
 | A2 | 成立 | provider 收到 `hello <SPIKE_1>`。router 層的 fallback（primary 回 503，`num_retries: 1`）：provider 依序收到 primary、primary、fallback 三次，內容都是改寫後的 `<SPIKE_1>`；`pre_call` 只跑一次、`post_call` 一次，`call_id` 相同 |
@@ -35,6 +35,7 @@ spec §4 的 S2–S5 分別對應 A2、A3、A4（含 A1 的 `call_type`）、A8�
 - **`async_post_call_failure_hook`**：自己丟的 403、provider 錯誤（404）、429 都會呼叫，但 429 只用**第一次**的 `call_id` 呼叫一次，fallback 那次的 `call_id` 不會收到 success 也不會收到 failure。跑 `demo_m2` 時，MCP 被 M2 擋下（`GovernanceBlocked`）的 13 次也會呼叫這個 hook，不論 guardrail 的 mode
 - **client 無法關閉 guardrail**：請求 body 帶 `metadata.disable_global_guardrails`、`metadata.opted_out_global_guardrails`、`guardrails: []` 時，guardrail 仍會執行（LiteLLM 只從 key / team 的管理端 metadata 讀取這兩個設定）
 - **deployment cooldown**：probe_llm 沒有 `/v1/embeddings`，回 404 後 `probe-primary` 進入 5 秒 cooldown，期間的請求不送 primary、直接走 fallback（第一次執行時 A7 因此只看到 fallback）。腳本在 fallback 相關檢查之間等待 6 秒，embeddings 放在最後
+- **驗證留下的 key**：`m4_spike.py` 每次執行會在 LiteLLM 建立一把 `spike-primary-only-<時間戳>` key（本次驗證共建立 3 把），只用於 A7，可以刪除
 - **主機環境**：主機的 venv 是 Python 3.14.3，`uv sync` 安裝 presidio-analyzer 2.2.364 與 spaCy 3.8.16，兩個 recognizer 可正常使用（首次 import 約 2 秒）
 
 ## 對後續 task 的影響
