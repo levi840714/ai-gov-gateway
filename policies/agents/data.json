@@ -3,6 +3,13 @@
     "owner": "compliance-engineering",
     "status": "active",
     "max_risk": "high",
+    "guardrails": {
+      "pii": {
+        "entities": ["TW_ID", "TW_ARC", "PHONE", "EMAIL", "CREDIT_CARD", "BANK_ACCOUNT", "API_KEY"],
+        "exclude": ["eth_address", "eth_tx_hash"]
+      },
+      "injection": {"action": "redact", "system_notice": false}
+    },
     "versions": {
       "1.4": {"key_alias": "kyt-agent@1.4", "approved_by": "governance-team", "approved_at": "2026-10-20"},
       "1.5": {"key_alias": "kyt-agent@1.5", "approved_by": "governance-team", "approved_at": "2026-10-21"}

@@ -29,7 +29,7 @@ sanctioned := "0x8589427373D6D84E98730D7795D8F6F8731FDA16"
 test_watchlist_allowed if {
 	result := governance.decision with input as call("add_to_watchlist", {"account_id": "a", "reason": "r"})
 	result.decision == "allow"
-	result.policy_version == "2026-10-21.1"
+	result.policy_version == "2026-10-23.1"
 }
 
 test_small_freeze_allowed if {
