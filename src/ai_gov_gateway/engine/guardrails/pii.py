@@ -1,13 +1,20 @@
+import importlib
 import json
 import re
+from bisect import bisect_left
 from collections import Counter
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from itertools import accumulate
 from typing import Any, Protocol
 
 from ai_gov_gateway.engine.guardrails.models import PiiSpan
 
 TOKEN = re.compile(r"<([A-Z][A-Z_]*?)_(\d+)>")
+# 這些類別的原值不能出現在 tool call 參數中：被注入的模型可藉此把真正的密鑰帶出去
+SECRET_ENTITIES = frozenset({"API_KEY"})
+_FULLWIDTH = {c: c - 0xFEE0 for c in range(0xFF01, 0xFF5F)}
+_NON_ASCII = re.compile(r"[^\x00-\x7f]")
 # 不能夾在英數字或小數中間：避免在 hex 地址、交易 hash、長數字與金額裡誤抓
 _L = r"(?<![A-Za-z0-9.])"
 _R = r"(?![A-Za-z0-9]|\.\d)"
@@ -24,16 +31,28 @@ def _checksum_ok(letter: str, digits: str) -> bool:
 
 
 def tw_id_valid(value: str) -> bool:
+    value = value.upper()
     return bool(re.fullmatch(r"[A-Z][12]\d{8}", value)) and _checksum_ok(value[0], value[1:])
 
 
 def tw_arc_valid(value: str) -> bool:
+    value = value.upper()
     if re.fullmatch(r"[A-Z][89]\d{8}", value):
         return _checksum_ok(value[0], value[1:])
     if re.fullmatch(r"[A-Z][A-D]\d{8}", value):
         # 舊式居留證的第二碼是字母，取其代碼的個位數計算
         return _checksum_ok(value[0], str(_LETTERS[value[1]] % 10) + value[2:])
     return False
+
+
+def _fold(text: str) -> str:
+    """全形 ASCII 轉半形，長度不變，範圍可直接對回原文。"""
+    return text.translate(_FULLWIDTH)
+
+
+def _ascii_only(text: str) -> str:
+    # Presidio 的 \b 與 \w 把中文當成字元，緊鄰中文的 email 與卡號會被漏掉
+    return _NON_ASCII.sub(" ", _fold(text))
 
 
 def _digit_count(low: int, high: int) -> Callable[[str], bool]:
@@ -57,17 +76,22 @@ class _RegexRecognizer:
         return found
 
 
+_MOBILE = r"(?:(?:\+886|886)[- ]?|0)9\d{2}[- ]?\d{3}[- ]?\d{3}"
+# 市話的區碼後一定要有括號或分隔，沒有分隔的 10 碼數字太容易和其他數字混淆
+_LANDLINE = "|".join(
+    [
+        r"\(0[2-8]\) ?\d{3,4}[- ]?\d{4}",
+        r"\(0[2-8]\d\) ?\d{3}[- ]?\d{3,4}",
+        r"0[2-8][- ]\d{3,4}[- ]?\d{4}",
+        r"0[2-8]\d[- ]\d{3}[- ]?\d{3,4}",
+        r"\+886[- ]?[2-8]\d?[- ]?\d{3,4}[- ]?\d{3,4}",
+    ]
+)
+
 _RECOGNIZERS = {
-    "TW_ID": _RegexRecognizer(re.compile(_L + r"([A-Z][12]\d{8})" + _R), tw_id_valid),
-    "TW_ARC": _RegexRecognizer(re.compile(_L + r"([A-Z][89A-D]\d{8})" + _R), tw_arc_valid),
-    "PHONE": _RegexRecognizer(
-        re.compile(
-            _L
-            + r"((?:\+886[- ]?|0)9\d{2}[- ]?\d{3}[- ]?\d{3}"
-            + r"|\(0[2-8]\)\d{3,4}-?\d{4}|0[2-8]-\d{3,4}-?\d{4})"
-            + _R
-        )
-    ),
+    "TW_ID": _RegexRecognizer(re.compile(_L + r"([A-Za-z][12]\d{8})" + _R), tw_id_valid),
+    "TW_ARC": _RegexRecognizer(re.compile(_L + r"([A-Za-z][89A-Da-d]\d{8})" + _R), tw_arc_valid),
+    "PHONE": _RegexRecognizer(re.compile(_L + r"(?<!\d-)(" + _MOBILE + "|" + _LANDLINE + ")" + _R)),
     "BANK_ACCOUNT": _RegexRecognizer(
         re.compile(
             r"(?i)(?:帳號|帳戶|戶名|account(?:\s*(?:no\.?|number))?|acct)[^\d\n]{0,12}"
@@ -80,6 +104,7 @@ _RECOGNIZERS = {
     "API_KEY": _RegexRecognizer(
         re.compile(
             r"(?<![A-Za-z0-9_-])(sk-[A-Za-z0-9_-]{16,}|AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{36}"
+            r"|github_pat_[A-Za-z0-9_]{20,}|AIza[0-9A-Za-z_-]{35}"
             r"|xox[bp]-[A-Za-z0-9-]{10,}|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})"
         )
     ),
@@ -95,6 +120,37 @@ class PiiDetector(Protocol):
     def detect(self, text: str, entities: list[str]) -> list[PiiSpan]: ...
 
 
+class _PresidioScan:
+    """直接套用 Presidio recognizer 的 pattern 與驗證。
+
+    不呼叫 analyze()：它的去重是 O(n²)，大量比對時會拖垮 gateway。
+    """
+
+    def __init__(self, recognizer: Any, min_score: float) -> None:
+        regex = importlib.import_module("regex")
+
+        self._recognizer = recognizer
+        self._min_score = min_score
+        self._patterns = [
+            (p.score, regex.compile(p.regex, recognizer.global_regex_flags))
+            for p in recognizer.patterns
+        ]
+
+    def spans(self, entity: str, text: str) -> list[PiiSpan]:
+        from presidio_analyzer.pattern_recognizer import REGEX_TIMEOUT_SECONDS
+
+        found = []
+        for base_score, compiled in self._patterns:
+            for match in compiled.finditer(text, timeout=REGEX_TIMEOUT_SECONDS):
+                if match.end() == match.start():
+                    continue
+                valid = self._recognizer.validate_result(match.group())
+                score = base_score if valid is None else (1.0 if valid else 0.0)
+                if score >= self._min_score:
+                    found.append(PiiSpan(entity=entity, start=match.start(), end=match.end()))
+        return found
+
+
 class PresidioDetector:
     """EMAIL 與 CREDIT_CARD 用 Presidio 的 recognizer，台灣格式與 API key 用自訂規則。"""
 
@@ -102,48 +158,59 @@ class PresidioDetector:
 
     def __init__(self) -> None:
         # 只用個別 recognizer、不建立 AnalyzerEngine，因此不需要 spaCy 語言模型
-        import tldextract
         from presidio_analyzer.predefined_recognizers import (
             CreditCardRecognizer,
             EmailRecognizer,
         )
+        from tldextract import TLDExtract
 
-        # email 驗證預設會在第一次使用時下載 Public Suffix List 且沒有逾時；只用套件內建的快照
-        tldextract.tldextract.TLD_EXTRACTOR = tldextract.TLDExtract(suffix_list_urls=())
+        class OfflineEmailRecognizer(EmailRecognizer):
+            # 預設的全域 extractor 會下載 Public Suffix List 且沒有逾時；改用私有的內建快照
+            def __init__(self) -> None:
+                super().__init__()
+                self._tld = TLDExtract(suffix_list_urls=(), cache_dir=None)
 
-        self._presidio: dict[str, tuple[Any, str]] = {
-            "EMAIL": (EmailRecognizer(), "EMAIL_ADDRESS"),
-            "CREDIT_CARD": (CreditCardRecognizer(), "CREDIT_CARD"),
+            def validate_result(self, pattern_text: str) -> bool:
+                return self._tld(pattern_text).fqdn != ""
+
+        self.email_recognizer = OfflineEmailRecognizer()
+        self._presidio = {
+            "EMAIL": _PresidioScan(self.email_recognizer, self.MIN_SCORE),
+            "CREDIT_CARD": _PresidioScan(CreditCardRecognizer(), self.MIN_SCORE),
         }
 
     def detect(self, text: str, entities: list[str]) -> list[PiiSpan]:
+        folded, ascii_text = _fold(text), _ascii_only(text)
         spans: list[PiiSpan] = []
         for entity in entities:
             if entity in self._presidio:
-                recognizer, name = self._presidio[entity]
-                spans += [
-                    PiiSpan(entity=entity, start=r.start, end=r.end)
-                    for r in recognizer.analyze(text, [name], None)
-                    if r.score >= self.MIN_SCORE
-                ]
+                spans += self._presidio[entity].spans(entity, ascii_text)
             elif entity in _RECOGNIZERS:
-                spans += _RECOGNIZERS[entity].spans(entity, text)
+                spans += _RECOGNIZERS[entity].spans(entity, folded)
         return spans
 
 
 def select_spans(text: str, spans: list[PiiSpan], exclude: list[str]) -> list[PiiSpan]:
-    """去掉與排除格式重疊的範圍；彼此重疊時保留較長的，回傳依位置排序。"""
-    blocked = [m.span() for name in exclude for m in EXCLUSIONS[name].finditer(text)]
-    kept: list[PiiSpan] = []
-    for span in sorted(spans, key=lambda s: (s.start, s.start - s.end)):
-        if any(span.start < end and start < span.end for start, end in blocked):
-            continue
-        if kept and span.start < kept[-1].end:
-            if span.end - span.start > kept[-1].end - kept[-1].start:
-                kept[-1] = span
-            continue
-        kept.append(span)
-    return kept
+    """去掉與排除格式重疊的範圍；彼此重疊時合併為聯集（類型取較長者），依位置排序。"""
+    blocked = sorted(m.span() for name in exclude for m in EXCLUSIONS[name].finditer(text))
+    starts = [start for start, _ in blocked]
+    reach = list(accumulate((end for _, end in blocked), max))
+
+    def is_blocked(span: PiiSpan) -> bool:
+        count = bisect_left(starts, span.end)
+        return count > 0 and reach[count - 1] > span.start
+
+    merged: list[PiiSpan] = []
+    for span in sorted((s for s in spans if not is_blocked(s)), key=lambda s: (s.start, -s.end)):
+        if merged and span.start < merged[-1].end:
+            last = merged[-1]
+            longer = span if span.end - span.start > last.end - last.start else last
+            merged[-1] = PiiSpan(
+                entity=longer.entity, start=last.start, end=max(last.end, span.end)
+            )
+        else:
+            merged.append(span)
+    return merged
 
 
 class PseudonymMap:
@@ -155,6 +222,7 @@ class PseudonymMap:
         self._values: dict[str, str] = {}
         self._entities: dict[str, str] = {}
         self._next: dict[str, int] = {}
+        self._occurrence: re.Pattern[str] | None = None
 
     @classmethod
     def reserving(cls, texts: Iterable[str]) -> "PseudonymMap":
@@ -178,20 +246,52 @@ class PseudonymMap:
             self._tokens[key] = token
             self._values[token] = value
             self._entities[token] = entity
+            self._occurrence = None
         return self._tokens[key]
+
+    def occurrences(self, text: str) -> list[PiiSpan]:
+        """text 中每一處已登錄的原值（較長的優先），不含落在我們自己代號內的部分。"""
+        if not self._values:
+            return []
+        if self._occurrence is None:
+            values = sorted({value for _, value in self._tokens}, key=len, reverse=True)
+            self._occurrence = re.compile("|".join(map(re.escape, values)))
+        entity_of = {value: entity for entity, value in reversed(list(self._tokens))}
+        own = [m.span() for m in TOKEN.finditer(text) if m.group(0) in self._values]
+        return [
+            PiiSpan(entity=entity_of[m.group(0)], start=m.start(), end=m.end())
+            for m in self._occurrence.finditer(text)
+            if not any(m.start() < end and start < m.end() for start, end in own)
+        ]
 
     def counts(self) -> dict[str, int]:
         return dict(Counter(self._entities.values()))
 
-    def restore(self, text: str) -> str:
-        return TOKEN.sub(lambda m: self._values.get(m.group(0), m.group(0)), text)
+    def restore(self, text: str, skip_entities: frozenset[str] = frozenset()) -> str:
+        def replace(match: re.Match[str]) -> str:
+            token = match.group(0)
+            if self._entities.get(token) in skip_entities:
+                return token
+            return self._values.get(token, token)
 
-    def restore_json(self, text: str) -> str:
+        return TOKEN.sub(replace, text)
+
+    def restore_json(self, text: str, skip_entities: frozenset[str] = SECRET_ENTITIES) -> str:
         try:
             value = json.loads(text)
         except ValueError:
-            return self.restore(text)
-        return json.dumps(_map_strings(value, self.restore), ensure_ascii=False)
+            return self.restore(text, skip_entities)
+        changed = False
+
+        def restore_string(item: str) -> str:
+            nonlocal changed
+            restored = self.restore(item, skip_entities)
+            changed = changed or restored != item
+            return restored
+
+        restored_value = _map_strings(value, restore_string)
+        # 沒有可還原的代號時原樣回傳，避免重新序列化改動數字精度與格式
+        return json.dumps(restored_value, ensure_ascii=False) if changed else text
 
 
 class Pseudonymizer:
@@ -200,13 +300,30 @@ class Pseudonymizer:
         self._entities = entities
         self._exclude = exclude
 
+    def register(self, text: str, pseudonyms: PseudonymMap) -> None:
+        """只登錄偵測到的原值、不改寫文字，讓同一值在其他訊息裡也能被遮蔽。"""
+        for span in self._spans(text, None):
+            pseudonyms.token(span.entity, text[span.start : span.end])
+
     def mask(self, text: str, pseudonyms: PseudonymMap) -> str:
-        spans = select_spans(text, self._detector.detect(text, self._entities), self._exclude)
-        # 先依出現順序取得代號，再由後往前替換，位置才不會位移
-        tokens = [pseudonyms.token(s.entity, text[s.start : s.end]) for s in spans]
-        for span, token in reversed(list(zip(spans, tokens, strict=True))):
-            text = text[: span.start] + token + text[span.end :]
-        return text
+        spans = self._spans(text, pseudonyms)
+        # 先依出現順序取得代號，再依序拼接，位置才不會位移
+        pieces: list[str] = []
+        position = 0
+        for span in spans:
+            pieces += [
+                text[position : span.start],
+                pseudonyms.token(span.entity, text[span.start : span.end]),
+            ]
+            position = span.end
+        pieces.append(text[position:])
+        return "".join(pieces)
+
+    def _spans(self, text: str, pseudonyms: PseudonymMap | None) -> list[PiiSpan]:
+        # 已登錄的值排在前面，與偵測結果等長時沿用原本的類型與代號
+        known = pseudonyms.occurrences(text) if pseudonyms else []
+        detected = self._detector.detect(text, self._entities)
+        return select_spans(text, known + detected, self._exclude)
 
     def mask_json(self, text: str, pseudonyms: PseudonymMap) -> str:
         try:

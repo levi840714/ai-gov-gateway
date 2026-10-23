@@ -1,4 +1,5 @@
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -139,10 +140,14 @@ def test_restore_json_escapes_quotes():
     assert pseudonyms.restore_json(f"not json {token}") == 'not json x"y@example.com'
 
 
-def test_email_validation_uses_bundled_suffix_list_only(detector):
+def test_email_validation_uses_private_bundled_suffix_list():
     import tldextract
 
-    assert tldextract.tldextract.TLD_EXTRACTOR.suffix_list_urls == ()
+    detector = PresidioDetector()
+    assert detector.email_recognizer._tld.suffix_list_urls == ()
+    assert tldextract.tldextract.TLD_EXTRACTOR.suffix_list_urls != ()
+    assert detector.email_recognizer.validate_result("a@example.com")
+    assert not detector.email_recognizer.validate_result("a@localhost")
 
 
 def test_empty_map_is_falsy():
@@ -166,3 +171,139 @@ def test_stream_restorer_handles_split_tokens():
 def test_stream_restorer_releases_long_non_token_text():
     restorer = StreamTextRestorer(PseudonymMap())
     assert restorer.feed("<" + "x" * 40) == "<" + "x" * 40
+
+
+HISTORY = ["我的帳號 0123456789012 請查餘額", "已查詢 0123456789012 的餘額"]
+
+
+def test_value_echoed_without_context_is_masked_after_sequential_mask(detector):
+    pseudonyms = PseudonymMap()
+    masker = Pseudonymizer(detector, ALL, [])
+    assert [masker.mask(t, pseudonyms) for t in HISTORY] == [
+        "我的帳號 <BANK_ACCOUNT_1> 請查餘額",
+        "已查詢 <BANK_ACCOUNT_1> 的餘額",
+    ]
+
+
+@pytest.mark.parametrize("history", [HISTORY, HISTORY[::-1]])
+def test_register_all_then_mask_covers_either_order(detector, history):
+    pseudonyms = PseudonymMap()
+    masker = Pseudonymizer(detector, ALL, [])
+    for text in history:
+        masker.register(text, pseudonyms)
+    masked = [masker.mask(t, pseudonyms) for t in history]
+    assert all("0123456789012" not in t and "<BANK_ACCOUNT_1>" in t for t in masked)
+    assert pseudonyms.counts() == {"BANK_ACCOUNT": 1}
+
+
+def test_register_does_not_rewrite_text_and_known_values_skip_own_tokens(detector):
+    pseudonyms = PseudonymMap()
+    masker = Pseudonymizer(detector, ALL, [])
+    masker.register("a@example.com", pseudonyms)
+    assert masker.mask("<EMAIL_1> 與 a@example.com", pseudonyms) == "<EMAIL_1> 與 <EMAIL_1>"
+    assert pseudonyms.occurrences("<EMAIL_1>") == []
+
+
+def test_known_values_respect_exclusions(detector):
+    pseudonyms = PseudonymMap()
+    pseudonyms.token("PHONE", "1111111111")
+    masked = Pseudonymizer(detector, ALL, ["eth_address"]).mask(f"{ADDRESS} 1111111111", pseudonyms)
+    assert masked == f"{ADDRESS} <PHONE_1>"
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("請寄到alice@example.com謝謝", [("EMAIL", "alice@example.com")]),
+        ("卡號4111111111111111，到期", [("CREDIT_CARD", "4111111111111111")]),
+        ("好的，已寄信到alice@example.com。", [("EMAIL", "alice@example.com")]),
+        ("ａｌｉｃｅ＠example.com", [("EMAIL", "ａｌｉｃｅ＠example.com")]),
+        ("Ａ１２３４５６７８９", [("TW_ID", "Ａ１２３４５６７８９")]),
+        ("身分證a123456789與居留證a800000014", [("TW_ID", "a123456789"), ("TW_ARC", "a800000014")]),
+    ],
+)
+def test_cjk_adjacency_and_fullwidth(detector, text, expected):
+    assert _found(detector, text) == expected
+
+
+def test_mask_only_touches_the_pii_next_to_chinese(detector):
+    masked = Pseudonymizer(detector, ALL, []).mask(
+        "好的，已寄信到alice@example.com。", PseudonymMap()
+    )
+    assert masked == "好的，已寄信到<EMAIL_1>。"
+
+
+@pytest.mark.parametrize(
+    "phone",
+    [
+        "(02) 2345-6789",
+        "(02)2345 6789",
+        "02 2345 6789",
+        "02-2345-6789",
+        "+886-2-2345-6789",
+        "+886 2 2345 6789",
+        "037-123456",
+        "049-2345678",
+        "(049)2345678",
+        "886912345678",
+        "+886-912-345-678",
+    ],
+)
+def test_detects_phone_formats(detector, phone):
+    assert _found(detector, f"電話 {phone} 謝謝") == [("PHONE", phone)]
+
+
+@pytest.mark.parametrize("text", ["0223456789", "日期 2026-03-12345678", "886912345678901"])
+def test_ignores_bare_or_embedded_numbers(detector, text):
+    assert _found(detector, text) == []
+
+
+@pytest.mark.parametrize("unit", ["a@example.com ", "4111 1111 1111 1111 "])
+def test_detection_cost_stays_linear(detector, unit):
+    text = unit * (200_000 // len(unit))
+    started = time.perf_counter()
+    spans = detector.detect(text, ["EMAIL", "CREDIT_CARD"])
+    assert len(spans) == 200_000 // len(unit)
+    assert time.perf_counter() - started < 1.5
+
+
+def test_masking_many_spans_stays_fast(detector):
+    text = "a@example.com " * 14_000
+    started = time.perf_counter()
+    masked = Pseudonymizer(detector, ["EMAIL"], ["eth_address"]).mask(text, PseudonymMap())
+    assert masked.startswith("<EMAIL_1> ")
+    assert time.perf_counter() - started < 1.5
+
+
+def test_overlapping_spans_merge_into_their_union():
+    spans = [
+        PiiSpan(entity="PHONE", start=0, end=10),
+        PiiSpan(entity="BANK_ACCOUNT", start=5, end=20),
+    ]
+    assert select_spans("x" * 30, spans, []) == [PiiSpan(entity="BANK_ACCOUNT", start=0, end=20)]
+
+
+def test_restore_json_without_issued_tokens_returns_text_unchanged():
+    pseudonyms = PseudonymMap()
+    pseudonyms.token("EMAIL", "a@example.com")
+    raw = '{"amount": 12345678901234567890, "note": "<EMAIL_9>",  "x": 1.0}'
+    assert pseudonyms.restore_json(raw) == raw
+
+
+def test_restore_json_never_restores_api_keys_but_content_restore_does():
+    pseudonyms = PseudonymMap()
+    key = pseudonyms.token("API_KEY", "sk-abcdefghijklmnopqrstuv")
+    email = pseudonyms.token("EMAIL", "a@example.com")
+    arguments = json.dumps({"to": email, "auth": key})
+    assert json.loads(pseudonyms.restore_json(arguments)) == {"to": "a@example.com", "auth": key}
+    assert pseudonyms.restore_json(f"not json {key}") == f"not json {key}"
+    assert pseudonyms.restore_json(arguments, frozenset()) != arguments
+    assert pseudonyms.restore(key) == "sk-abcdefghijklmnopqrstuv"
+
+
+@pytest.mark.parametrize(
+    "key",
+    ["github_pat_" + "A1b2" * 6, "AIza" + "Sy" * 17 + "a", "ghp_" + "a1" * 18],
+)
+def test_detects_more_api_key_formats(detector, key):
+    assert _found(detector, f"key {key}") == [("API_KEY", key)]
