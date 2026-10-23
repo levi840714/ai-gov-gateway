@@ -443,6 +443,25 @@ gateway 從容器的環境變數讀取這些設定，值寫在 `docker-compose.y
 
 </details>
 
+## 用量、成本與稽核紀錄
+
+gateway 會留下以下紀錄，都在 compose 的 Postgres（`127.0.0.1:55433`）。`governance_test` 只給整合測試使用，每次測試都會清空。
+
+| 想知道的事 | 資料庫 | 表 | 內容 |
+| ---------- | ------ | -- | ---- |
+| 每次 LLM 呼叫的成本與延遲 | `litellm` | `LiteLLM_SpendLogs` | 成本、token、模型、key、狀態、`startTime` / `endTime` / `completionStartTime`（首個 token）、`request_duration_ms` |
+| 每天的成本、失敗率與延遲 | `litellm` | `LiteLLM_DailyModelUsage`、`LiteLLM_DailyTagSpend` | 依模型、key 彙總的成本、token、成功與失敗次數；`DailyTagSpend` 另有 cache 節省的金額與 `total_response_time_ms` |
+| 各路由的請求結果 | `litellm` | `LiteLLM_DailyGatewayRequests` | 每天每條路由的成功與失敗次數 |
+| key 的權限、限額與累計花費 | `litellm` | `LiteLLM_VerificationToken`、`LiteLLM_DeletedVerificationToken` | 可用模型、`allowed_routes`、rpm、tpm、`max_budget`、`spend`、`metadata`；刪除的 key 保留刪除時間與刪除者 |
+| 實際被呼叫過的 MCP tool | `litellm` | `LiteLLM_ToolTable`、`LiteLLM_SpendLogToolIndex` | tool 名稱、來源 server、呼叫次數、最後使用時間；請求與 tool 的對應 |
+| 治理決策、審批與 guardrail 的發現 | `governance` | `audit_events`、`approvals` | tool 決策、審批的狀態變化、`llm_guardrail` 事件；以 hash chain 串接 |
+
+- LiteLLM 的表名有大小寫，SQL 裡要加雙引號，例如 `SELECT * FROM "LiteLLM_SpendLogs"`
+- `LiteLLM_SpendLogs` 的 `messages` 與 `response` 是空的：沒有開啟 `store_prompts_in_spend_logs`，對話內容不落地
+- `llm_guardrail` 事件的 `details.call_id` 與 `LiteLLM_SpendLogs.litellm_call_id` 是同一個值，可以把治理紀錄與用量對起來
+- `request_duration_ms` 是整段時間，包含 guardrail、OPA 查詢與模型；目前沒有分段的 trace、dashboard 或告警
+- `probe-primary`、`probe-fallback` 是測試 provider，沒有定價，統計成本時可以用 `model_group` 篩掉
+
 ## 專案結構
 
 ```
