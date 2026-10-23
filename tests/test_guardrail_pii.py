@@ -1,6 +1,7 @@
 import json
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -10,6 +11,7 @@ from ai_gov_gateway.engine.guardrails.pii import (
     Pseudonymizer,
     PseudonymMap,
     StreamTextRestorer,
+    _PresidioScan,
     select_spans,
     tw_arc_valid,
     tw_id_valid,
@@ -307,3 +309,59 @@ def test_restore_json_never_restores_api_keys_but_content_restore_does():
 )
 def test_detects_more_api_key_formats(detector, key):
     assert _found(detector, f"key {key}") == [("API_KEY", key)]
+
+
+@pytest.mark.parametrize(
+    ("entity", "value", "text"),
+    [
+        (
+            "BANK_ACCOUNT",
+            "0123456789012",
+            "區塊 1012345678901 金額 20123456789.5 ref ID0123456789X",
+        ),
+        ("PHONE", "0912345678", "order 20912345678 與 0912345678x"),
+        ("BANK_ACCOUNT", "0123456789", "0xab0123456789cd" + "e" * 40),
+        ("EMAIL", "a@example.com", "xa@example.com"),
+    ],
+)
+def test_known_values_are_not_matched_inside_longer_strings(entity, value, text):
+    pseudonyms = PseudonymMap()
+    pseudonyms.token(entity, value)
+    assert pseudonyms.occurrences(text) == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["mail a@example.com.", "信箱：a@example.com。", "(a@example.com)", "a@example.com, b"],
+)
+def test_known_email_still_matches_at_sentence_boundaries(text):
+    pseudonyms = PseudonymMap()
+    pseudonyms.token("EMAIL", "a@example.com")
+    [span] = pseudonyms.occurrences(text)
+    assert text[span.start : span.end] == "a@example.com"
+
+
+def test_known_value_with_symbol_edges_still_matches():
+    pseudonyms = PseudonymMap()
+    pseudonyms.token("PHONE", "(02)2345-6789")
+    assert len(pseudonyms.occurrences("x(02)2345-6789")) == 1
+
+
+def test_known_value_boundary_does_not_hide_the_real_detection(detector):
+    pseudonyms = PseudonymMap()
+    masker = Pseudonymizer(detector, ALL, [])
+    masker.register("a@example.com", pseudonyms)
+    assert masker.mask("xa@example.com", pseudonyms) == "<EMAIL_2>"
+
+
+def test_presidio_scan_drops_invalidated_matches():
+    class Stub(SimpleNamespace):
+        def validate_result(self, text: str) -> bool | None:
+            return None
+
+        def invalidate_result(self, text: str) -> bool:
+            return text == "bad1"
+
+    recognizer = Stub(patterns=[SimpleNamespace(score=0.8, regex=r"\w+\d")], global_regex_flags=0)
+    spans = _PresidioScan(recognizer, 0.5).spans("EMAIL", "bad1 ok2")
+    assert [(s.start, s.end) for s in spans] == [(5, 8)]

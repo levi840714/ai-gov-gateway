@@ -144,6 +144,8 @@ class _PresidioScan:
             for match in compiled.finditer(text, timeout=REGEX_TIMEOUT_SECONDS):
                 if match.end() == match.start():
                     continue
+                if self._recognizer.invalidate_result(match.group()):
+                    continue
                 valid = self._recognizer.validate_result(match.group())
                 score = base_score if valid is None else (1.0 if valid else 0.0)
                 if score >= self._min_score:
@@ -213,6 +215,13 @@ def select_spans(text: str, spans: list[PiiSpan], exclude: list[str]) -> list[Pi
     return merged
 
 
+def _bounded(value: str) -> str:
+    # 與 recognizer 相同的邊界，避免在無關的長數字、ID 或 hex 中間誤換；非英數的邊緣不需要
+    left = _L if value[0].isalnum() else ""
+    right = _R if value[-1].isalnum() else ""
+    return left + re.escape(value) + right
+
+
 class PseudonymMap:
     """單次請求的代號對照；只存在記憶體，不寫入稽核或日誌。"""
 
@@ -250,12 +259,12 @@ class PseudonymMap:
         return self._tokens[key]
 
     def occurrences(self, text: str) -> list[PiiSpan]:
-        """text 中每一處已登錄的原值（較長的優先），不含落在我們自己代號內的部分。"""
+        """text 中每一處獨立出現的已登錄原值（較長的優先），不含落在我們自己代號內的部分。"""
         if not self._values:
             return []
         if self._occurrence is None:
             values = sorted({value for _, value in self._tokens}, key=len, reverse=True)
-            self._occurrence = re.compile("|".join(map(re.escape, values)))
+            self._occurrence = re.compile("|".join(map(_bounded, values)))
         entity_of = {value: entity for entity, value in reversed(list(self._tokens))}
         own = [m.span() for m in TOKEN.finditer(text) if m.group(0) in self._values]
         return [
