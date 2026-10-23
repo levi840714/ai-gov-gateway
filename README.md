@@ -1,24 +1,26 @@
 # AI Governance Gateway
 
+AI Governance Gateway 是 AI agent 存取 LLM 與工具的統一治理入口。它以 [LiteLLM](https://github.com/BerriAI/litellm) 作為 LLM 與 MCP 的 gateway，在同一個 process 裡加上 agent 身份、委託授權、policy 判斷、人工審批、LLM guardrail 與防竄改稽核；agent 與 Supervisor 都只連到這一個入口。
+
 **AI agent 要替人執行高風險動作時，先確認身份、套用 policy，必要時等人核准；送給模型的內容，先擋下注入、遮蔽個資。**
 
-AI Governance Gateway 是 agent 存取 LLM 與工具的統一入口。LLM 和 MCP 流量交給 [LiteLLM](https://github.com/BerriAI/litellm) 處理，治理邏輯跑在同一個 process 裡：
+兩條流量各自經過這些檢查：
 
-- **tool 呼叫**：檢查是哪個 agent、代表哪位使用者、這個動作能不能做、要不要主管核准
+- **tool 呼叫**：檢查是哪個 agent、代表哪位使用者、這個動作能不能做、要不要 Supervisor 核准
 - **LLM 請求**：檢查 tool 結果裡有沒有夾帶指令，送出前把個資換成代號，回應時再換回原值
 
 所有決策都寫進同一條防竄改的稽核紀錄。
 
 ![ai-gov-gateway 的整體架構與能力](docs/images/architecture.svg)
 
-agent 與主管只連 gateway。LLM 與 tool 兩條流量各自經過治理，再送到模型供應商與下游系統；顏色標示每項能力加入的開發階段。
+LLM 與 tool 兩條流量各自經過治理，再送到模型供應商與下游系統；顏色標示每項能力加入的開發階段。
 
 一次需要核准的 tool 呼叫大致是這樣：
 
 ```
 agent 呼叫 freeze_account，凍結 25,000 美元
   → gateway：金額超過門檻，回傳 pending_approval 與 approval_id
-主管執行 agw approvals approve <approval_id>（不能是委託 agent 的那個人）
+Supervisor 執行 agw approvals approve <approval_id>（不能是委託 agent 的那個人）
 agent 用同樣的參數再送一次
   → gateway：核准有效、參數相符，放行這一次
 ```
@@ -36,7 +38,7 @@ agent 執行有副作用的動作（例如凍結帳戶、送出申報）之前�
 | 原則 | 做法 |
 | ---- | -------------- |
 | 最小權限 | 每個 agent 版本一把 key，policy 依 agent、使用者角色、tool 與參數值判斷 |
-| 職責分離（maker-checker） | agent 只能發起高風險動作，要由另一位主管核准 |
+| 職責分離（maker-checker） | agent 只能發起高風險動作，要由另一位 Supervisor 核准 |
 | 可稽核 | 決策寫入 hash chain，任何一筆被改過都查得出來 |
 | 預設拒絕 | token 無效、policy 沒回應、資料庫或稽核寫入失敗、guardrail 無法判斷時，一律拒絕 |
 | 資料最小化 | 送給模型供應商前，身分證、電話、帳號、API key 等換成代號；對照表只存在 gateway 的記憶體 |
@@ -73,7 +75,7 @@ LLM guardrail：
 ```mermaid
 flowchart LR
     agent(["AI agent"]) -->|"virtual key + 使用者 token"| gw
-    sup(["主管<br/>agw CLI"]) -->|"Keycloak token"| gw
+    sup(["Supervisor<br/>agw CLI"]) -->|"Keycloak token"| gw
     subgraph gw["gateway（單一容器、單一 process、:4000）"]
         litellm["LiteLLM<br/>/v1、/mcp"]
         llmhook["LLM guardrail<br/>pre / post-call"]
@@ -135,7 +137,7 @@ uv run python -m scripts.demo_m4
 | 情境 | 預期結果 |
 | ---- | -------- |
 | 低風險動作、小額凍結 | 放行 |
-| 大額凍結 → 主管核准 → 重送 | 放行一次，第三次送出又要重新審批 |
+| 大額凍結 → Supervisor 核准 → 重送 | 放行一次，第三次送出又要重新審批 |
 | 委託人自己核准 | `403 self_approval_forbidden` |
 | 核准後改了金額 | 要重新審批 |
 | 涉及制裁地址、送出 STR | 一律送審 |
@@ -167,7 +169,7 @@ uv run python -m scripts.demo_m4
 
 過程中腳本會暫時停止 OPA，並建立一把用完即刪的 tpm 測試 key。
 
-Keycloak 裡的測試帳號有 `alice`（分析師）、`bob`（主管）、`carol`（兩種角色都有）。這些帳號和 client secret 都是 `keycloak/realm-governance.json` 裡的測試值，只能在本機使用。
+Keycloak 裡的測試帳號有 `alice`（分析師）、`bob`（Supervisor）、`carol`（兩種角色都有）。這些帳號和 client secret 都是 `keycloak/realm-governance.json` 裡的測試值，只能在本機使用。
 
 ## 使用方式
 
@@ -182,7 +184,7 @@ agent 用 MCP client 連到 `http://localhost:4000/mcp`，並帶上兩個 header
 
 `Authorization` 只能有一個。如果還帶了其他以 `authorization` 開頭的 header，gateway 會回 `400 ambiguous_authorization_headers`，以免稽核記錄的使用者和下游實際執行的使用者對不上。
 
-收到 `pending_approval` 時，agent 記下 `approval_id`，等主管核准後，用一模一樣的參數再送一次就好，不需要額外的參數。重送前可以用委託人的 token 呼叫 `GET /governance/approvals/{id}/status` 確認是否已核准，避免在待審期間重送。可以參考 [`scripts/agent_sim.py`](scripts/agent_sim.py)；實際接入的例子是 kyt_agent v1.5。
+收到 `pending_approval` 時，agent 記下 `approval_id`，等 Supervisor 核准後，用一模一樣的參數再送一次就好，不需要額外的參數。重送前可以用委託人的 token 呼叫 `GET /governance/approvals/{id}/status` 確認是否已核准，避免在待審期間重送。可以參考 [`scripts/agent_sim.py`](scripts/agent_sim.py)；實際接入的例子是 kyt_agent v1.5。
 
 LLM 的請求用 OpenAI 相容格式送到 `http://localhost:4000/v1/chat/completions`，模型名稱用 `litellm/config.yaml` 裡定義的別名。LLM key 只能呼叫 chat completions，請求內容會經過 [LLM guardrail](#llm-guardrail)。
 
@@ -209,7 +211,7 @@ uv run agw audit verify                            # 驗證整條稽核紀錄
 | ---------- | ---- |
 | `GET /governance/approvals?status=pending` | 列出審批 |
 | `GET /governance/approvals/{id}` | 查看詳情與歷史 |
-| `GET /governance/approvals/{id}/status` | 查詢審批狀態，供 agent 在重送前確認；委託人本人或主管可查，其他人一律 404。只回傳 `id`、`status`、`reasons`、`expires_at`、`decided_at`，不含參數與核准意見 |
+| `GET /governance/approvals/{id}/status` | 查詢審批狀態，供 agent 在重送前確認；委託人本人或 Supervisor 可查，其他人一律 404。只回傳 `id`、`status`、`reasons`、`expires_at`、`decided_at`，不含參數與核准意見 |
 | `POST /governance/approvals/{id}/approve` | 核准，body 為 `{"comment": "…"}`，最多 2000 字 |
 | `POST /governance/approvals/{id}/reject` | 駁回 |
 | `GET /governance/audit/verify` | 驗證稽核紀錄，回傳 `{"records": N, "first_invalid_id": null}` |
@@ -505,7 +507,7 @@ LLM guardrail 的契約測試需要 `probe_llm` 與 `scripts.make_keys` 建立�
 LLM guardrail：
 
 - LLM 請求從 M4 起依賴 OPA。OPA 停擺時所有 LLM 流量都會失敗（`503 policy_unavailable`），可用性要求比只影響高風險 tool 時更高
-- 規則比對換個說法就能繞過（例如 Ignore everything above、同形字）。它是多層防護的一層，搭配 spotlighting、高風險 tool 的主管核准與 agent 自身的防護，不保證擋下所有注入
+- 規則比對換個說法就能繞過（例如 Ignore everything above、同形字）。它是多層防護的一層，搭配 spotlighting、高風險 tool 的 Supervisor 核准與 agent 自身的防護，不保證擋下所有注入
 - tool 結果在送進 LLM 時才檢查，agent 本地已經讀到原文；LLM 不經 gateway 的 agent 不受保護
 - 只有 tool 結果會正規化。其他訊息被零寬字元拆開的 email 不會被遮蔽
 - 只偵測固定格式的 PII，人名、地址不會被假名化；圖片等非文字內容不掃描
