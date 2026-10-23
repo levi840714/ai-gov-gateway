@@ -471,7 +471,7 @@ ENV PYTHONPATH=/opt/ai-gov-gateway
 
 `guardrails/` 目錄在 Task 4 才有內容；本 task 先建立 `guardrails/.gitkeep` 讓 `COPY` 成功，Task 4 再刪除。
 
-`pyproject.toml` 的 `[dependency-groups] dev` 加入 `"presidio-analyzer==<PRESIDIO_VERSION>"`（host 的單元測試用），並在 `[[tool.mypy.overrides]]` 的 module 加入 `"presidio_analyzer", "presidio_analyzer.*"`。執行 `uv sync`。
+`pyproject.toml` 的 `[[tool.mypy.overrides]]` 也要涵蓋 `tldextract`（Task 5 會用到）。`pyproject.toml` 的 `[dependency-groups] dev` 加入 `"presidio-analyzer==<PRESIDIO_VERSION>"`（host 的單元測試用），並在 `[[tool.mypy.overrides]]` 的 module 加入 `"presidio_analyzer", "presidio_analyzer.*"`。執行 `uv sync`。
 
 - [ ] **Step 3: S1 — 確認裝得進去且不影響 M2**
 
@@ -1276,6 +1276,12 @@ def test_restore_json_escapes_quotes():
     assert pseudonyms.restore_json(f"not json {token}") == 'not json x"y@example.com'
 
 
+def test_email_validation_uses_bundled_suffix_list_only(detector):
+    import tldextract
+
+    assert tldextract.tldextract.TLD_EXTRACTOR.suffix_list_urls == ()
+
+
 def test_empty_map_is_falsy():
     assert not PseudonymMap()
 
@@ -1401,10 +1407,14 @@ class PresidioDetector:
 
     def __init__(self) -> None:
         # 只用個別 recognizer、不建立 AnalyzerEngine，因此不需要 spaCy 語言模型
+        import tldextract
         from presidio_analyzer.predefined_recognizers import (
             CreditCardRecognizer,
             EmailRecognizer,
         )
+
+        # email 驗證預設會在第一次使用時下載 Public Suffix List 且沒有逾時；只用套件內建的快照
+        tldextract.tldextract.TLD_EXTRACTOR = tldextract.TLDExtract(suffix_list_urls=())
 
         self._presidio: dict[str, tuple[Any, str]] = {
             "EMAIL": (EmailRecognizer(), "EMAIL_ADDRESS"),
@@ -2317,7 +2327,7 @@ git commit -m "feat: guard LLM requests with injection screening and pseudonymiz
 - Create: `scripts/llm_sim.py`、`tests/integration/test_llm_guardrail_contract.py`
 - Test: `tests/test_hook_adapter.py`、`tests/test_config.py`
 
-開始前先讀 `docs/spikes/m4-findings.md`，依 A1、A4、A6 的結論確認下面的 `CHAT_CALL_TYPES` 與 streaming 處理；結論與本 task 的程式不同時，依 findings 調整並在報告中說明。
+開始前先讀 `docs/spikes/m4-findings.md`。已依 findings 調整：`CHAT_CALL_TYPES` 只有 `acompletion`；streaming 不會呼叫 success hook，所以在 iterator hook 開頭取出對照表是安全的；新增 `async_post_call_failure_hook` 清掉對照表（先在映像中確認 v1.105.1 的方法簽章：`docker compose exec -T gateway python -c "import inspect; from litellm.integrations.custom_logger import CustomLogger; print(inspect.signature(CustomLogger.async_post_call_failure_hook))"`，不同時依實際簽章調整）。key 觸發 tpm/rpm 限制時，proxy 會以 fallback 模型與新的 call_id 重跑整個 pre-call，留下沒有對應回應的對照表，由 `_MAX_PENDING` 的上限回收；同一個請求也會寫兩次稽核。錯誤回應的 body 會被 LiteLLM 包在 `error.message` 與 `error.provider_specific_fields`，測試只斷言狀態碼與 `response.text` 中的錯誤代碼。
 
 - [ ] **Step 1: 寫還原的失敗測試**（加在 `tests/test_hook_adapter.py` 結尾）
 
@@ -2511,8 +2521,8 @@ from ai_gov_gateway.hook_adapter import (
 檔案結尾新增：
 
 ```python
-# Task 2 A1 的結論：chat completions 的 call_type
-CHAT_CALL_TYPES = frozenset({"acompletion", "completion"})
+# docs/spikes/m4-findings.md A1：chat（含 streaming）一律是 acompletion；embeddings 是 aembedding
+CHAT_CALL_TYPES = frozenset({"acompletion"})
 MCP_CALL_TYPE = "call_mcp_tool"
 # 對照表只放在這個 process 的記憶體；放進 data 的 metadata 會被 LiteLLM 的 callback 記錄
 _PSEUDONYMS: OrderedDict[str, PseudonymMap] = OrderedDict()
@@ -2575,6 +2585,12 @@ class LlmGuardrailHook(CustomGuardrail):
             logger.error("llm guardrail restore failed: %s", type(error).__name__)
             raise _reject(502, "guardrail_output_error") from None
         return response
+
+    async def async_post_call_failure_hook(
+        self, request_data: dict[str, Any], original_exception: Exception, user_api_key_dict: Any
+    ) -> None:
+        # 請求失敗時清掉對照表；MCP 被治理擋下時也會呼叫，call_id 不在表中就什麼都不做
+        _forget(request_data.get("litellm_call_id"))
 
     async def async_post_call_streaming_iterator_hook(
         self, user_api_key_dict: Any, response: Any, request_data: dict[str, Any]
@@ -2768,7 +2784,7 @@ git commit -m "feat: run LLM guardrail in LiteLLM pre and post call hooks"
 - Modify: `litellm/config.yaml`、`docker-compose.yml`、`.env.example`、`scripts/make_keys.py`
 - Test: `tests/integration/test_llm_guardrail_contract.py`
 
-開始前讀 `docs/spikes/m4-findings.md` 的 A7（key 是否要列出 fallback 模型）與 A8（tpm 的計算方式）。
+已依 `docs/spikes/m4-findings.md` 確認：A7 key 不必列出 fallback 模型；A8 tpm 在呼叫後累計、下一次呼叫前檢查（200 → 429 → 429），且有 fallback 時 proxy 會先試 fallback 模型再回 429。主力回 503 後 deployment 會冷卻約 5 秒，冷卻期間請求直接送 fallback：fallback 測試放在檔案最後，測試結束前 `time.sleep(6)`。
 
 - [ ] **Step 1: 寫整合測試**（加在 `tests/integration/test_llm_guardrail_contract.py` 結尾；`uuid` 與 `env` 的 import 移到檔案開頭）
 
@@ -2817,7 +2833,7 @@ def test_tpm_limit_returns_429():
     assert statuses[0] == 200 and 429 in statuses[1:], statuses
 ```
 
-A8 的結論若是事前檢查（第一次就 429），把最後一行改成 `assert statuses[0] == 429`，並在報告中說明。
+（A8 已確認為事後累計。）
 
 - [ ] **Step 2: 設定**
 
@@ -2848,7 +2864,7 @@ router_settings:
 OPENAI_API_KEY=
 ```
 
-`scripts/make_keys.py` 的 `kyt-agent` 改為（`models` 是否加入 `kyt-main-fallback` 依 A7）：
+`scripts/make_keys.py` 的 `kyt-agent` 改為（A7：不必列出 `kyt-main-fallback`）：
 
 ```python
     # 一個 kyt 案件約 13 萬 token，分散在數分鐘內
@@ -3023,6 +3039,8 @@ def main() -> int:
 
     clear_probe()
     response = echo(TW_ID, "probe:fail=probe-primary")
+    # 主力回 503 後會冷卻約 5 秒（findings A2），後面的情境要等冷卻結束才會再送主力
+    time.sleep(6)
     models = [r["model"] for r in probe_requests()]
     leaked = any(TW_ID in json.dumps(r, ensure_ascii=False) for r in probe_requests())
     check(
@@ -3200,7 +3218,10 @@ git commit -m "test: validate guardrails and fallback with real LLM runs"
 | 邊界字串 | 列在 `role.marker` | 不列為規則，只做改寫 | 改寫已能防止提前關閉；列為規則會讓 kyt 的內容被整段移除 |
 | `probe_llm` 的網路 | 只接內部網路 | 綁 `127.0.0.1:8300` | demo 與整合測試要在主機上讀取記錄的請求 |
 | fallback 的真實驗證 | 對話中途切換 | 整段對話由 fallback 回應 | 見 Task 11 Step 4 的說明 |
-| 其他 | | | Task 2 findings 中不成立的假設、Task 4 調整過的規則、A7 / A8 的結論 |
+| email 驗證 | （未提及） | tldextract 只用內建的 suffix list 快照 | 預設會在第一次使用時連網下載且沒有逾時 |
+| 映像大小 | （未提及） | 1.73 GB → 2.03 GB（壓縮後 +58 MB） | spaCy 套件本身，不含語言模型 |
+| 對照表的回收 | 單次請求 | 成功、失敗與 streaming 結束時取出，另有數量上限 | 觸發 tpm/rpm 時 proxy 會以新的 call_id 重跑 pre-call |
+| 其他 | | | Task 4、5 調整過的規則與 A1–A8 的其他結論 |
 
 spec 開頭的狀態改為「已實作；實作時的調整見 §13」。
 
