@@ -4,7 +4,6 @@
 """
 
 import logging
-from collections import OrderedDict
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -15,11 +14,14 @@ from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from ai_gov_gateway.api.approvals import router
+from ai_gov_gateway.engine.guardrails.fields import check_request
 from ai_gov_gateway.engine.guardrails.models import GuardrailError
-from ai_gov_gateway.engine.guardrails.pii import PseudonymMap
 from ai_gov_gateway.engine.models import Outcome
 from ai_gov_gateway.engine.store import StoreUnavailable
 from ai_gov_gateway.hook_adapter import (
+    PendingPseudonyms,
+    RestoreError,
+    client_body,
     has_ambiguous_authorization,
     restore_response,
     restore_stream,
@@ -91,19 +93,7 @@ class GovernanceGuardrail(CustomGuardrail):
 CHAT_CALL_TYPES = frozenset({"acompletion"})
 MCP_CALL_TYPE = "call_mcp_tool"
 # 對照表只放在這個 process 的記憶體；放進 data 的 metadata 會被 LiteLLM 的 callback 記錄
-_PSEUDONYMS: OrderedDict[str, PseudonymMap] = OrderedDict()
-# rate limit 觸發的 fallback 會留下收不到後續 hook 的 call_id，靠數量上限回收
-_MAX_PENDING = 1000
-
-
-def _remember(call_id: str, pseudonyms: PseudonymMap) -> None:
-    _PSEUDONYMS[call_id] = pseudonyms
-    while len(_PSEUDONYMS) > _MAX_PENDING:
-        _PSEUDONYMS.popitem(last=False)
-
-
-def _forget(call_id: object) -> PseudonymMap | None:
-    return _PSEUDONYMS.pop(call_id, None) if isinstance(call_id, str) else None
+_PENDING = PendingPseudonyms()
 
 
 def _reject(status: int, code: str) -> HTTPException:
@@ -121,6 +111,7 @@ class LlmGuardrailHook(CustomGuardrail):
             raise _reject(400, "call_type_not_governed")
         call_id = data.get("litellm_call_id")
         try:
+            check_request(client_body(data), data)
             guardrail = (await get_services()).llm_guardrail
             guarded = await guardrail.guard_request(
                 key_alias=getattr(user_api_key_dict, "key_alias", None),
@@ -137,14 +128,14 @@ class LlmGuardrailHook(CustomGuardrail):
         if guarded.pseudonyms:
             if not isinstance(call_id, str) or not call_id:
                 raise _reject(503, "guardrail_unavailable")
-            _remember(call_id, guarded.pseudonyms)
+            _PENDING.remember(call_id, guarded.pseudonyms)
         data["messages"] = guarded.messages
         return data
 
     async def async_post_call_success_hook(
         self, data: dict[str, Any], user_api_key_dict: Any, response: Any
     ) -> Any:
-        pseudonyms = _forget(data.get("litellm_call_id"))
+        pseudonyms = _PENDING.pop(data.get("litellm_call_id"))
         if not pseudonyms:
             return response
         try:
@@ -162,16 +153,20 @@ class LlmGuardrailHook(CustomGuardrail):
         traceback_str: str | None = None,
     ) -> None:
         # MCP 被治理擋下時也會呼叫；call_id 不在表中就什麼都不做
-        _forget(request_data.get("litellm_call_id"))
+        _PENDING.pop(request_data.get("litellm_call_id"))
 
     async def async_post_call_streaming_iterator_hook(
         self, user_api_key_dict: Any, response: Any, request_data: dict[str, Any]
     ) -> AsyncIterator[Any]:
         # streaming 不會呼叫 success hook，對照表在這裡取出
-        pseudonyms = _forget(request_data.get("litellm_call_id"))
+        pseudonyms = _PENDING.pop(request_data.get("litellm_call_id"))
         if not pseudonyms:
             async for chunk in response:
                 yield chunk
             return
-        async for chunk in restore_stream(response, pseudonyms):
-            yield chunk
+        try:
+            async for chunk in restore_stream(response, pseudonyms):
+                yield chunk
+        except RestoreError as error:
+            logger.error("llm guardrail stream restore failed: %s", error)
+            raise _reject(502, "guardrail_output_error") from None

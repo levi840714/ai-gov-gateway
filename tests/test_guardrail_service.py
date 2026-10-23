@@ -320,3 +320,29 @@ async def test_echoed_account_number_gets_the_same_token(echo_first):
         "user": "我的帳號 <BANK_ACCOUNT_1> 請查餘額",
         "assistant": "已查詢 <BANK_ACCOUNT_1> 的餘額",
     }
+
+
+async def test_identifiers_are_pseudonymized_consistently():
+    # name 與 tool call id 會原樣送給 provider；同一個值換成同一個代號，tool 結果仍對得上 call
+    guardrail, _, _, _ = _guardrail()
+    messages = [
+        {"role": "user", "name": "amy@example.com", "content": "hi"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "bob@example.com",
+                    "type": "function",
+                    "function": {"name": "get_counterparties", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "bob@example.com", "content": "ok"},
+    ]
+    guarded = await _guard(guardrail, messages)
+    assert "example.com" not in json.dumps(guarded.messages)
+    assert guarded.messages[0]["name"] == "<EMAIL_1>"
+    call_id = guarded.messages[1]["tool_calls"][0]["id"]
+    assert call_id == guarded.messages[2]["tool_call_id"] == "<EMAIL_2>"
+    assert 'name="get_counterparties"' in guarded.messages[2]["content"]

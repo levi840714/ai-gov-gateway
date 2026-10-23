@@ -44,14 +44,19 @@ class PiiSpan(BaseModel):
 class GuardrailError(Exception):
     """以 HTTP 狀態碼與 governance JSON 回給 client；內容只含代碼。"""
 
-    def __init__(self, status: int, code: str, rules: list[str] | None = None) -> None:
+    def __init__(
+        self, status: int, code: str, rules: list[str] | None = None, field: str | None = None
+    ) -> None:
         super().__init__(code)
         self.status = status
         self.code = code
         self.rules = rules or []
+        self.field = field
 
     def body(self) -> dict[str, Any]:
         body: dict[str, Any] = {"governance": "denied", "reasons": [self.code]}
         if self.rules:
             body["rules"] = self.rules
+        if self.field:
+            body["field"] = self.field
         return body

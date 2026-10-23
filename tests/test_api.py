@@ -48,7 +48,7 @@ def services(store: InMemoryStore) -> Services:
         policy=FakeGuardrailPolicy(),
         store=store,
         detector=FakePiiDetector(),
-        rules=RuleDetector.from_file(Path("guardrails/injection_rules.json")),
+        rules=RuleDetector.from_file(Path(__file__).parents[1] / "guardrails/injection_rules.json"),
         max_chars=1000,
     )
     return Services(

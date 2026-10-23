@@ -5,6 +5,9 @@ import pytest
 
 from ai_gov_gateway.engine.guardrails.pii import PseudonymMap
 from ai_gov_gateway.hook_adapter import (
+    PendingPseudonyms,
+    RestoreError,
+    client_body,
     has_ambiguous_authorization,
     restore_response,
     restore_stream,
@@ -125,3 +128,86 @@ async def test_restore_stream_flushes_held_text_into_finish_chunk():
     chunks = [_chunk("價格 <"), _chunk(None, finish="stop")]
     out = [c async for c in restore_stream(_chunks(chunks), _pseudonyms())]
     assert "".join(c.choices[0].delta.content or "" for c in out) == "價格 <"
+
+
+def _choice(index, content=None, calls=None, finish=None):
+    return NS(index=index, delta=NS(content=content, tool_calls=calls), finish_reason=finish)
+
+
+async def test_restore_stream_waits_for_every_choice_with_tool_calls():
+    # n=2：choice 0 先結束時，choice 1 的參數還沒收完，不能提早還原
+    first = NS(name="send", arguments='{"to": "<EMA')
+    second = NS(name=None, arguments='IL_1>"}')
+    chunks = [
+        NS(choices=[_choice(1, calls=[NS(index=0, id="x", function=first)])]),
+        NS(choices=[_choice(0, "done", finish="stop")]),
+        NS(choices=[_choice(1, calls=[NS(index=0, id=None, function=second)])]),
+        NS(choices=[_choice(1, finish="tool_calls")]),
+    ]
+    out = [c async for c in restore_stream(_chunks(chunks), _pseudonyms())]
+    assert len(out) == 4
+    assert json.loads(first.arguments + second.arguments) == {"to": 'x"y@example.com'}
+
+
+async def test_restore_stream_flushes_held_text_when_stream_ends_without_finish():
+    out = [c async for c in restore_stream(_chunks([_chunk("寄給 <EMAIL_1")]), _pseudonyms())]
+    assert "".join(c.choices[0].delta.content or "" for c in out) == "寄給 <EMAIL_1"
+
+
+class _BrokenMap(PseudonymMap):
+    def restore(self, text, skip_entities=frozenset()):
+        raise TypeError(text)
+
+
+async def test_restore_stream_wraps_failures_without_content():
+    pseudonyms = _BrokenMap()
+    pseudonyms.token("EMAIL", "amy@example.com")
+    with pytest.raises(RestoreError) as error:
+        [c async for c in restore_stream(_chunks([_chunk("amy@example.com")]), pseudonyms)]
+    assert str(error.value) == "TypeError"
+
+
+def test_restore_response_restores_legacy_function_call():
+    message = NS(content=None, tool_calls=None, function_call=NS(arguments='{"to": "<EMAIL_1>"}'))
+    restore_response(NS(choices=[NS(message=message)]), _pseudonyms())
+    assert json.loads(message.function_call.arguments) == {"to": 'x"y@example.com'}
+
+
+def test_client_body_reads_proxy_server_request():
+    body = {"model": "m", "messages": []}
+    assert client_body({"proxy_server_request": {"body": body}}) == body
+    assert client_body({"proxy_server_request": {"body": None}}) is None
+    assert client_body({}) is None
+
+
+class _Clock:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def test_pending_pseudonyms_pop_once():
+    pending = PendingPseudonyms()
+    pending.remember("c1", _pseudonyms())
+    assert pending.pop("c1") is not None
+    assert pending.pop("c1") is None
+    assert pending.pop(None) is None
+
+
+def test_pending_pseudonyms_drop_expired_and_excess_entries(caplog):
+    clock = _Clock()
+    pending = PendingPseudonyms(max_entries=2, ttl_seconds=600, clock=clock)
+    pending.remember("old", _pseudonyms())
+    clock.now = 601
+    pending.remember("a", _pseudonyms())
+    pending.remember("b", _pseudonyms())
+    pending.remember("c", _pseudonyms())
+    assert (pending.pop("old"), pending.pop("a")) == (None, None)
+    assert len(pending) == 2
+    assert [r.getMessage() for r in caplog.records] == [
+        "dropped pending pseudonym maps: expired=1 evicted=0",
+        "dropped pending pseudonym maps: expired=0 evicted=1",
+    ]
+    assert "example.com" not in caplog.text

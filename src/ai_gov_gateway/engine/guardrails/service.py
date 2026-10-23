@@ -175,6 +175,8 @@ class LlmGuardrail:
                     part["text"] = masker.mask(part["text"], pseudonyms)
             for function in _functions(message):
                 function["arguments"] = masker.mask_json(function["arguments"], pseudonyms)
+            for holder, key in _identifiers(message):
+                holder[key] = masker.mask(holder[key], pseudonyms)
         for index, label in labels.items():
             messages[index]["content"] = spotlight(label, messages[index]["content"])
         return pseudonyms
@@ -242,9 +244,17 @@ def _functions(message: Message) -> list[dict[str, Any]]:
     return [f for f in functions if isinstance(f, dict) and isinstance(f.get("arguments"), str)]
 
 
+def _identifiers(message: Message) -> list[tuple[dict[str, Any], str]]:
+    """會原樣送給 provider 的名稱與 call id；tool 名稱由開發者定義，不在其中。"""
+    holders = [(message, "name"), (message, "tool_call_id")]
+    holders += [(call, "id") for call in _calls(message)]
+    return [(holder, key) for holder, key in holders if isinstance(holder.get(key), str)]
+
+
 def _texts(messages: list[Message]) -> list[str]:
     texts = [_text_of(m.get("content")) for m in messages]
     texts += [f["arguments"] for m in messages for f in _functions(m)]
+    texts += [holder[key] for m in messages for holder, key in _identifiers(m)]
     return texts
 
 
@@ -261,6 +271,7 @@ def _pii_texts(messages: list[Message]) -> Iterator[str]:
                 yield from _json_strings(json.loads(function["arguments"]))
             except ValueError:
                 yield function["arguments"]
+        yield from (holder[key] for holder, key in _identifiers(message))
 
 
 def _json_strings(value: Any) -> Iterator[str]:
