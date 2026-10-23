@@ -75,22 +75,26 @@ spec §4 的 S1–S5 對應下表：S1 為「S1 / Presidio 打包」與「S1 / t
 - eval 本身沒有產生任何 `llm_guardrail` 稽核列。視窗內看到的 8 列來自同時進行的 probe 測試（model `probe-primary`、agent `guard-strict`），不是 kyt 的請求。結論：kyt 的工具輸出（鏈上資料）沒有觸發注入規則，也沒有偵測到 PII，guardrail 沒有誤判，也沒有 `redact` 或 `deny` 的列
 - 統計稽核列的 SQL 要寫成 `(details->'pii')::text`：`details` 是 `json` 型別，不能直接放進 `GROUP BY`
 
-### 2. 強制 fallback（3 筆）：未完成
+### 2. 強制 fallback（3 筆）
 
-設定：`litellm/config.fallback.yaml`（與 `config.yaml` 相同，只把 `kyt-main` 指向 `probe_llm`）加 `docker-compose.fallback.yml`（`PROBE_FAIL_MODELS=kyt-main`）。指令：`kyt eval --limit 3`，`LLM_PRICE_MODEL=openai:gpt-6-luna`。輸出存於 `var/m4-fallback-eval.txt`，結果檔為 `kyt_agent/var/eval/20261023-134358-openai_kyt-main.json`。
+設定：`litellm/config.fallback.yaml`（與 `config.yaml` 相同，只把 `kyt-main` 指向 `probe_llm`）加 `docker-compose.fallback.yml`（`PROBE_FAIL_MODELS=kyt-main`）。指令：`kyt eval --limit 3`，`LLM_PRICE_MODEL=openai:gpt-6-luna`，`LANGSMITH_TRACING=false`。輸出存於 `var/m4-fallback-eval.txt`，結果檔為 `kyt_agent/var/eval/20261023-135305-openai_kyt-main.json`（replay 模式）。
 
-| 項目 | 結果 |
-| ---- | ---- |
-| 3 筆 | 全部失敗（`errors` 3、召回率與誤報率無資料），成本 $0 |
-| 錯誤 | kyt 收到 HTTP 503（`ServiceUnavailableError`）；原因鏈為主力 `kyt-main` 回 503（probe），fallback 到 `kyt-main-fallback` 也失敗：OpenAI 回 `RateLimitError`，`type=insufficient_quota`、`code=credit_balance_exhausted`（帳戶沒有餘額） |
-| probe 收到的請求 | 18 筆，全部是 `kyt-main`（每筆 kyt 嘗試 = 主力 1 次 + `num_retries` 1 次；kyt 每案嘗試 3 次，`LLM_MAX_RETRIES=2`，共 3 × 3 × 2 = 18） |
-| spend logs | `openai/kyt-main` 9 筆 failure（3 案 × 3 次）；沒有任何 `openai/gpt-6-luna` 的成功紀錄（唯一一筆 gpt-6-luna 是 11:07 的較早失敗） |
+第一次執行（13:43）因 OpenAI 帳戶沒有餘額全部失敗：kyt 收到 503，原因鏈為主力 `kyt-main` 回 503（probe），fallback 到 `kyt-main-fallback` 後 OpenAI 回 `insufficient_quota` / `credit_balance_exhausted`；probe 收到 18 筆 `kyt-main`、spend logs 沒有 gpt-6-luna 成功紀錄。使用者儲值後以相同指令重跑，結果如下。
 
-驗證到的部分：gateway 已載入 `OPENAI_API_KEY`，主力 503 後 router 確實改送 `kyt-main-fallback`，請求有送到 OpenAI（沿用 guardrail 改寫後的訊息，key 的 `models` 只列 `kyt-main` 仍不被擋，與 A7 一致）。
+| 地址（前 10 碼） | 類別 | 預期 | gpt-6-luna（fallback） | 規則 | v1.4 / Gemini 同地址 | 工具呼叫 | token |
+| ---------------- | ---- | ---- | ---------------------- | ---- | -------------------- | -------- | ----- |
+| `0xd5af44dd` | `mixer_depositor` | risky | HIGH | HIGH | HIGH | 5（Gemini 8） | 17,517 |
+| `0x6aae3e74` | `mixer_depositor` | risky | HIGH | HIGH | HIGH | 5（Gemini 7） | 15,611 |
+| `0x01959602` | `mixer_depositor` | risky | HIGH | HIGH | HIGH | 9（Gemini 5） | 18,757 |
 
-未驗證的部分：fallback 模型的實際回應、等級與 v1.4 的比較、gpt-6-luna 的成本。原因是 OpenAI 帳戶需要儲值（平台的 billing 頁），與 gateway 設定無關。儲值後以相同指令重跑（`docker compose -f docker-compose.yml -f docker-compose.fallback.yml up -d gateway probe_llm` → `kyt eval --limit 3`），完成後再補上這一節的結果。
-
-整段對話都由 fallback 回應，而不是對話中途才切換：kyt 以 OpenAI 相容格式送出完整歷史，由 LiteLLM 轉換成各 provider 的格式，中途切換時 provider 收到的歷史格式與全程使用 fallback 相同（待上述重跑確認）。
+- 3 筆都完成，沒有 `CaseFailed`，錯誤 0；召回率 100%（3/3）；等級與 Gemini 的全量 eval 結果（第 1 節的結果檔）相同，三筆都是 HIGH，等級都落在預期。這 3 筆沒有負例，誤報率無資料
+- 平均 6.3 次工具呼叫、17,295 token、input 快取命中率 35%（Gemini 的 3 筆沒有快取命中）；kyt 估算成本 $0.0090（以 `openai:gpt-6-luna` 的價格計算）
+- 快照缺漏 1（第 3 筆，不影響結果）
+- 證據一：probe 收到 28 筆請求，model 全部是 `kyt-main`（`PROBE_FAIL_MODELS=kyt-main`，每次都回 503）；沒有任何 `kyt-main-fallback` 請求到 probe，因為 fallback 指向 OpenAI
+- 證據二：LiteLLM spend logs 在重跑期間（13:50 之後）只有 `openai/gpt-6-luna` 14 筆，全部 `success`，沒有其他 model 或 failure
+- 因此 3 筆的每一次 LLM 呼叫都由 gpt-6-luna 回應，不是中途才切換。guardrail 改寫後的 messages 沿用到 fallback（A2），key 的 `models` 只列 `kyt-main` 也不被擋（A7），與實測一致
+- 整段對話都由 fallback 回應：kyt 以 OpenAI 相容格式送出完整歷史，由 LiteLLM 轉換成各 provider 的格式，中途切換時 provider 收到的歷史格式與全程使用 fallback 相同
+- 限制：只有 3 筆（皆為混幣器充值地址），只能說明 fallback 路徑可用、等級一致，不能代表 gpt-6-luna 在整批資料的召回率與誤報率
 
 ### 3. 還原
 
