@@ -70,6 +70,7 @@ services:
       DATABASE_URL: postgresql://litellm:${POSTGRES_PASSWORD}@postgres:5432/litellm
       LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       AI_GATEWAY_CLIENT_SECRET: ${AI_GATEWAY_CLIENT_SECRET}
       STORE_MODEL_IN_DB: "True"
       GOV_DATABASE_URL: postgresql://litellm:${POSTGRES_PASSWORD}@postgres:5432/governance

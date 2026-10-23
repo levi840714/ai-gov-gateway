@@ -1,6 +1,8 @@
 """升級 LiteLLM 前必跑：確認 LLM guardrail 的 hook 仍改寫送出內容並還原回應。"""
 
 import json
+import time
+import uuid
 
 import httpx
 import pytest
@@ -137,3 +139,47 @@ def test_message_names_are_pseudonymized():
     response = chat("kyt-agent@llm-demo", messages)
     assert response.status_code == 200, response.text
     assert probe_requests()[-1]["messages"][-1]["name"] == "<TW_ID_1>"
+
+
+def test_tpm_limit_returns_429():
+    # 每次建立新 key：tpm 以分鐘計，沿用舊 key 會受上一次測試影響
+    created = httpx.post(
+        f"{LITELLM_URL}/key/generate",
+        headers={"Authorization": f"Bearer {env('LITELLM_MASTER_KEY')}"},
+        json={
+            "key_alias": f"guard-tpm-{uuid.uuid4().hex[:8]}",
+            "models": ["probe-primary"],
+            "tpm_limit": 1000,
+            "allowed_routes": ["/v1/chat/completions", "/chat/completions"],
+        },
+        timeout=30,
+    )
+    created.raise_for_status()
+    key = created.json()["key"]
+    messages = [{"role": "system", "content": "probe:usage=5000"}, {"role": "user", "content": "x"}]
+    statuses = [
+        httpx.post(
+            f"{LITELLM_URL}/v1/chat/completions",
+            headers={"Authorization": f"Bearer {key}"},
+            json={"model": "probe-primary", "messages": messages},
+            timeout=30,
+        ).status_code
+        for _ in range(3)
+    ]
+    # A8：tpm 依已完成的請求累計，第一次放行、之後超過上限
+    assert statuses[0] == 200 and 429 in statuses[1:], statuses
+
+
+def test_fallback_receives_pseudonymized_content():
+    messages = [
+        {"role": "system", "content": "probe:reply=echo\nprobe:fail=probe-primary"},
+        {"role": "user", "content": TW_ID},
+    ]
+    response = chat("kyt-agent@llm-demo", messages)
+    assert response.status_code == 200, response.text
+    sent = probe_requests()
+    assert [r["model"] for r in sent][-1] == "probe-fallback"
+    assert all(TW_ID not in json.dumps(r, ensure_ascii=False) for r in sent)
+    assert response.json()["choices"][0]["message"]["content"] == TW_ID
+    # 主力回 503 後 deployment 冷卻約 5 秒，等冷卻結束以免影響其他測試
+    time.sleep(6)

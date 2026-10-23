@@ -3,6 +3,10 @@ model_list:
     litellm_params:
       model: gemini/gemini-3.8-flash
       api_key: os.environ/GOOGLE_API_KEY
+  - model_name: kyt-main-fallback
+    litellm_params:
+      model: openai/gpt-6-luna
+      api_key: os.environ/OPENAI_API_KEY
   # 測試 provider：demo 與整合測試用，不花 LLM 費用
   - model_name: probe-primary
     litellm_params:
@@ -16,7 +20,8 @@ model_list:
       api_key: probe
 
 router_settings:
-  fallbacks: [{"probe-primary": ["probe-fallback"]}]
+  # Gemini 出錯（429、5xx、逾時、連線錯誤）時改送 gpt-6-luna；kyt 本身也會重試，gateway 端各只做一次
+  fallbacks: [{"kyt-main": ["kyt-main-fallback"]}, {"probe-primary": ["probe-fallback"]}]
   num_retries: 1
 
 general_settings:

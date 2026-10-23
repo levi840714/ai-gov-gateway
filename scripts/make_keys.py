@@ -30,7 +30,14 @@ KYT_V15_ACCESS = {
 }
 
 KEYS = {
-    "kyt-agent": {**LLM_ROUTES, "models": ["kyt-main"], "rpm_limit": 60, "max_budget": 5.0},
+    # 一個 kyt 案件約 13 萬 token，分散在數分鐘內
+    "kyt-agent": {
+        **LLM_ROUTES,
+        "models": ["kyt-main"],
+        "rpm_limit": 60,
+        "max_budget": 5.0,
+        "tpm_limit": 300000,
+    },
     "rate-probe": {**LLM_ROUTES, "models": ["kyt-main"], "rpm_limit": 2, "max_budget": 0.05},
     "kyt-agent-mcp": {
         **MCP_ROUTES,
