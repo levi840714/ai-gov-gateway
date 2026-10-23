@@ -1,7 +1,7 @@
 # M4 LLM guardrail 與流量韌性設計
 
 - 日期：2026-10-23
-- 狀態：設計完成，尚未實作
+- 狀態：已實作；實作時的調整見 §13
 - 前一階段：[M2 治理服務設計](2026-10-20-m2-governance-design.md)；M3 的設計在 kyt_agent repo 的 `docs/specs/2026-10-21-kyt-agent-v1.5-design.md`
 
 ## 1. 目標與範圍
@@ -223,9 +223,10 @@ Dockerfile 改成多階段建置：
 ## 9. fallback 與 tpm
 
 - `litellm/config.yaml` 新增 `kyt-main-fallback`（`openai/gpt-6-luna`），`router_settings.fallbacks` 設定 `kyt-main` 失敗時改送它
-- 只在 429、5xx、逾時與連線錯誤時觸發；400 這類內容錯誤不觸發
-- LiteLLM 重試 1 次、fallback 1 次；kyt 本身會重試 2 次，兩邊疊加最多放大成數倍呼叫，所以 gateway 端壓低次數
-- `.env` 新增 `OPENAI_API_KEY`；沒有設定時 fallback 不可用，但主力仍可運作
+- 主力重試後仍失敗就觸發，不限錯誤類型：400、401、403、404 也會改送 fallback，LiteLLM 沒有依狀態碼限制 fallback 的設定。因此 Gemini 的 key 設錯時，client 拿到的是 `gpt-6-luna` 的正常回應，問題只會出現在 gateway 日誌
+- `router_settings.num_retries: 1`：一次 LLM 呼叫最多送出主力 2 次、fallback 2 次；kyt 本身會重試 2 次，再乘上去。gateway 端壓低次數，避免故障時呼叫量放大
+- `.env` 新增 `OPENAI_API_KEY`；沒有設定時 fallback 失敗，client 收到的是主力原本的錯誤，主力正常時不受影響。主力每次失敗都會多一次注定失敗的上游呼叫
+- fallback 不檢查 key 的 `models` 與預算（LiteLLM 的 `enforce_fallback_model_access` 預設關閉）：`kyt-agent` 的 key 只列 `kyt-main`，仍能經 fallback 用到 `gpt-6-luna`。這是刻意的設定，否則每把 key 都要列出 fallback 模型
 - `scripts/make_keys.py` 為 `kyt-agent` 設定 `tpm_limit: 300000`（一個 kyt 案件約 13 萬 token，分散在數分鐘內）；超過時 LiteLLM 回 429
 - kyt 的成本估算固定以 Gemini 計價，發生 fallback 時會偏高或偏低；LiteLLM 的 spend 仍然正確。只寫進文件，不改 kyt
 
@@ -239,10 +240,15 @@ Dockerfile 改成多階段建置：
 | Presidio 或規則比對發生例外 | 503 `guardrail_unavailable` |
 | 有發現但稽核寫入失敗 | 503 `audit_write_failed` |
 | 注入且 agent 設定為 `deny` | 400 `prompt_injection_detected` |
-| 單則訊息超過掃描上限 | 400 `content_too_large` |
+| 單則訊息或整個請求超過掃描上限（NFKC 展開後也檢查） | 400 `content_too_large` |
+| OPA 回傳的設定不完整或名稱不支援 | 503 `policy_error` |
+| `messages` 不是物件陣列 | 400 `invalid_messages` |
+| 單次請求的不同 PII 值超過 1,000 個 | 400 `too_many_pii_values` |
+| 單一 PII 值超過 2,048 字元 | 400 `pii_value_too_long` |
+| 請求帶了 guardrail 不遮罩的欄位 | 400 `unsupported_field`，`field` 只回欄位名稱 |
 | 還原失敗 | 502 `guardrail_output_error` |
 | agent 已停用 | 403 `agent_suspended` |
-| 受治理的 key 呼叫非 chat completions 端點 | 400 `call_type_not_governed` |
+| 非 chat 的呼叫進入 hook（例如 master key 呼叫 embeddings） | 400 `call_type_not_governed`；受治理的 key 在 LiteLLM 驗證 key 時就被 `allowed_routes` 擋下（見 §13） |
 
 LLM 請求從 M4 起依賴 OPA。OPA 停擺會讓所有 LLM 流量失敗，可用性要求比 M2 只影響高風險 tool 時更高，這點寫進 README 的已知限制。
 
@@ -314,3 +320,39 @@ OpenAI 相容的測試 provider，只接內部網路：
 | LLM 流量依賴 OPA | OPA 停擺時所有 agent 停擺 | 維持 fail-closed，在 README 標註可用性需求 |
 | LiteLLM 升級改變 hook 行為 | guardrail 失效或請求失敗 | 整合測試涵蓋 hook 契約，升級前必跑 |
 | fallback 與 kyt 重試疊加 | 故障時呼叫量放大 | gateway 端重試與 fallback 各 1 次 |
+
+## 13. 實作後修訂
+
+實作與上文不同之處，以本節為準。
+
+| 項目 | 原本 | 實作 | 原因 |
+| ---- | ---- | ---- | ---- |
+| spaCy 模型 | 安裝最小的英文模型 | 不安裝任何語言模型；不建立 `AnalyzerEngine`，直接套用 `EmailRecognizer`、`CreditCardRecognizer` 的 pattern 與 `validate_result` / `invalidate_result` | 不建立 AnalyzerEngine 就不需要 NLP engine；`analyze()` 的去重是平方時間，大量比對時會拖慢 gateway |
+| Presidio 的安裝 | builder 階段以 uv 安裝，複製到 `/opt/gov-deps` | 在 LiteLLM 映像內以 `ensurepip` 安裝 `presidio-analyzer==2.2.364`，裝完移除 pip；新增的 22 個套件以 `guardrails/presidio-constraints.txt` 固定版本 | 映像有 `ensurepip`，`pip freeze` 前後比對既有套件不變（findings S1） |
+| 映像大小 | （未提及） | 1.73 GB → 2.03 GB（壓縮後 411 MB → 469 MB，+58 MB） | spaCy 套件本身，不含語言模型 |
+| email 驗證 | （未提及） | `EmailRecognizer` 改用私有的 `TLDExtract(suffix_list_urls=())`，只用內建的 suffix list 快照 | 預設會在第一次驗證時下載 Public Suffix List，且沒有逾時 |
+| 邊界字串 | 列在 `role.marker` | 獨立規則 `role.boundary`（不分大小寫、容許空白）；spotlighting 的跳脫同樣不分大小寫 | 審查發現 `<</TOOL_OUTPUT>>`、`<< /tool_output` 這類變體可繞過只比對小寫的改寫 |
+| 規則的 ReDoS | （未提及） | 行首比對改用 `[ \t]*`，`toolcall.name` 的間隔限制長度；20 萬字元的換行、空白與重複字元有計時測試 | 原寫法遇到大量換行或空白時為平方時間 |
+| 不可見字元的範圍 | U+200B–U+200D、U+2060、U+FEFF、雙向控制、tag 字元 | 另加 soft hyphen、U+034F、U+061C、LRM/RLM、U+2061–U+2064、韓文填充字元、變體選擇字元等 | NFKC 不會移除這些字元，可用來打斷規則比對 |
+| 只有不可見字元時 | 列為注入規則類別 | 一律移除並記為 `hidden.chars`，處理方式記為 `flag`，不觸發 `redact` / `deny` | 只有不可見字元時，移除後的內容就安全；整段刪除會誤刪正常內容 |
+| 角色覆寫規則 | 「你現在是」、you are now | 規則拆成 `override.zh_role`、`override.en_role`，後面必須接角色相關的詞（助手、AI、系統、a / an / DAN 等） | 「你現在是我們的 VIP 客戶」這類正常句子會誤判 |
+| `rules_version` | （未定） | `2026-10-23.2` | 上述規則調整後的版本 |
+| PII 偵測的文字 | 原文 | 在長度不變的折疊副本上偵測：全形 ASCII 轉半形；交給 Presidio 的副本另把非 ASCII 字元換成空白 | Presidio 的 `\b` 把中文當成字元，緊鄰中文的 email、卡號會漏掉；長度不變才能把範圍直接對回原文 |
+| 假名化的步驟 | 逐則訊息偵測後替換 | 兩階段：先登錄所有訊息裡偵測到的值，再逐則遮蔽；遮蔽時也替換已登錄的值（前後必須是邊界，以前綴樹 regex 比對） | 關鍵字只出現在後面的訊息時（例如「帳號」），前面照抄的同一個值也要遮蔽；模型照抄的值沒有上下文也偵測不到 |
+| 假名化的上限 | （未提及） | 每次請求最多 1,000 個不同的值（`too_many_pii_values`）、單值最多 2,048 字元（`pii_value_too_long`）；前綴樹編譯失敗時拒絕，沒有逐值比對的慢速退路 | 比對成本是文字長度 × 值的數量，上限讓最壞情況維持在一秒內；2,048 字元涵蓋常見的 JWT |
+| 假名化的範圍 | 訊息內容與 tool call 參數 | 另加訊息的 `name`、`tool_call_id` 與 `tool_calls[].id`，兩邊用同一個代號 | 這些欄位會原樣送給 provider；兩邊代號一致，模型才對得起 tool call 與結果 |
+| tool 參數的還原 | 所有代號 | `restore_json` 不把 `API_KEY` 還原進 tool call 參數；沒有任何代號被還原時回傳原字串 | 被注入的模型可以把金鑰的代號寫進 tool 參數帶出去；原樣回傳避免重新序列化改變數字格式 |
+| 請求欄位 | （未提及） | 欄位白名單（`engine/guardrails/fields.py`），其他欄位回 400 `unsupported_field`；`tools` 的描述、`response_format` 的 schema、`stop`、tool 名稱視為開發者定義，允許但不遮蔽 | guardrail 只遮蔽訊息與 tool 參數，其他欄位會原樣送出。嚴格白名單也會拒絕 `presence_penalty`、`logprobs`、`reasoning_effort`、`cache_control` 等，需要時再加入 |
+| 受治理 key 的路由 | 拒絕非 chat 的呼叫 | `make_keys.py` 為 LLM key 設 `allowed_routes: ["/v1/chat/completions", "/chat/completions"]`，MCP key 設 `["mcp_inference_routes"]`；hook 另外拒絕 `acompletion` 以外的 call type | provider pass-through（`/gemini`、`/openai` 等）、files、threads 不經過 pre-call hook；受治理的 key 因此也不能呼叫 `/v1/models` 與 Azure 風格的路由 |
+| chat 的 call type | （未定） | 只有 `acompletion`；embeddings 是 `aembedding`，回 `call_type_not_governed` | findings A1 |
+| 舊版 `function` 角色 | （未提及） | 視同 `tool`，同樣檢查注入與加上邊界 | 內容同樣來自外部 |
+| 訊息格式錯誤 | （未提及） | `messages` 不是物件陣列時回 400 `invalid_messages` | 避免格式錯誤的訊息被略過而原樣送出 |
+| 掃描上限 | 單則 `GOV_GUARDRAIL_MAX_CHARS` | 另加整個請求的 `GOV_GUARDRAIL_MAX_TOTAL_CHARS`（預設 1,000,000）；NFKC 展開後再檢查一次；規則比對與 PII 偵測以 `asyncio.to_thread` 執行 | NFKC 可能把一個字元展開成十幾個；CPU 工作不能卡住 gateway 的 event loop |
+| OPA 設定錯誤 | 只有 `policy_unavailable` | 設定缺欄位或名稱不支援時為 503 `policy_error` | 與 OPA 停擺分開，方便排查 |
+| 對照表的回收 | 單次請求內 | `PendingPseudonyms`：success、failure 與 streaming 結束時取出；另有 TTL 10 分鐘與 1,000 筆上限，丟棄時只記數量 | tpm / rpm 觸發時 proxy 以新的 `call_id` 重跑 pre-call，這個 `call_id` 收不到任何後續 hook；同一個請求也因此寫兩筆稽核 |
+| streaming 的還原 | 文字保留緩衝；tool call 暫存到完整 | 每個 choice 各自處理文字；tool call 暫存到所有含 tool call 的 choice 都結束才還原；多留一個 chunk，串流沒有 `finish_reason` 就結束時暫存文字仍有地方放 | `n > 1` 時其他 choice 的參數可能還沒收完；最後一個 chunk 只帶 usage 時，暫存的文字可能遺失（已知限制） |
+| `streaming_with_pii_unsupported` | S4 不成立時使用 | 未使用 | S4 成立（findings A4） |
+| fallback 的觸發條件 | 只在 429、5xx、逾時與連線錯誤時 | 主力的任何錯誤都會觸發（§9 已改寫） | LiteLLM 沒有依狀態碼限制 fallback 的設定 |
+| fallback 的真實驗證 | 對話中途切換 provider | 整段對話都由 fallback 回應（`config.fallback.yaml` 把 `kyt-main` 指向一律回 503 的 `probe_llm`） | kyt 送出完整歷史，由 LiteLLM 轉成各 provider 的格式，中途切換時 provider 收到的格式與全程使用 fallback 相同。**狀態：路由已驗證，真實模型的回應待驗證（OpenAI 帳戶額度不足），見 findings「真實 LLM 驗證」** |
+| `probe_llm` 的網路 | 只接內部網路 | 綁 `127.0.0.1:8300` | demo 與整合測試要在主機上讀取它記錄的請求 |
+| tpm | （待 S5） | 事後累計、事前比對：超過上限的第一個請求仍放行，之後回 429 | findings A8 |
