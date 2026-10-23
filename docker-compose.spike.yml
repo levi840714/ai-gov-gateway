@@ -1,0 +1,9 @@
+# 只在 M4 驗證時疊加：docker compose -f docker-compose.yml -f docker-compose.spike.yml up -d gateway
+services:
+  gateway:
+    environment:
+      PYTHONPATH: /opt/ai-gov-gateway:/opt/spike
+    volumes:
+      - ./litellm/config.spike.yaml:/app/config.yaml:ro
+      - ./scripts/spikes:/opt/spike/scripts/spikes:ro
+      - ./scripts/__init__.py:/opt/spike/scripts/__init__.py:ro

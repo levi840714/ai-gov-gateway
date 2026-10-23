@@ -18,7 +18,14 @@ dependencies = [
 agw = "ai_gov_gateway.cli:app"
 
 [dependency-groups]
-dev = ["mypy>=1.18", "pytest>=8.4", "pytest-asyncio>=0.24", "ruff>=0.13"]
+dev = [
+    "mypy>=1.18",
+    # 與 Dockerfile 的版本一致：主機上的單元測試用
+    "presidio-analyzer==2.2.364",
+    "pytest>=8.4",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.13",
+]
 # M1 驗證腳本、示範腳本與 account_ops 用；gateway 映像內是 mcp 2.x，不可列入套件相依
 scripts = ["mcp>=1.30,<2", "python-dotenv>=1.1"]
 
@@ -46,7 +53,7 @@ disallow_untyped_defs = true
 warn_unused_ignores = true
 
 [[tool.mypy.overrides]]
-module = ["litellm", "litellm.*"]
+module = ["litellm", "litellm.*", "presidio_analyzer", "presidio_analyzer.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

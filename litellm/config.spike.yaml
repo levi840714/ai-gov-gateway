@@ -1,0 +1,67 @@
+model_list:
+  - model_name: kyt-main
+    litellm_params:
+      model: gemini/gemini-3.8-flash
+      api_key: os.environ/GOOGLE_API_KEY
+  # 測試 provider：demo 與整合測試用，不花 LLM 費用
+  - model_name: probe-primary
+    litellm_params:
+      model: openai/probe-primary
+      api_base: http://probe_llm:8300/v1
+      api_key: probe
+  - model_name: probe-fallback
+    litellm_params:
+      model: openai/probe-fallback
+      api_base: http://probe_llm:8300/v1
+      api_key: probe
+
+router_settings:
+  fallbacks: [{"probe-primary": ["probe-fallback"]}]
+  num_retries: 1
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  database_url: os.environ/DATABASE_URL
+
+mcp_servers:
+  probe:
+    url: "http://probe_mcp:8100/mcp"
+    transport: "http"
+    auth_type: oauth2_token_exchange
+    token_exchange_endpoint: "http://keycloak:8080/realms/governance/protocol/openid-connect/token"
+    client_id: "ai-gateway"
+    client_secret: os.environ/AI_GATEWAY_CLIENT_SECRET
+    audience: "probe-mcp"
+    # V8：審查當下的 tool 定義；上游變更時改送鎖定版本並發出 mcp_pinned_tools_changed 警告
+    pinned_tools:
+      whoami:
+        description: "Return the headers and bearer token claims this server received."
+        input_schema: {"properties": {}, "title": "whoamiArguments", "type": "object"}
+      echo:
+        description: "Echo the given text."
+        input_schema:
+          properties: {text: {title: Text, type: string}}
+          required: [text]
+          title: echoArguments
+          type: object
+  account_ops:
+    url: "http://account_ops:8200/mcp"
+    transport: "http"
+    auth_type: oauth2_token_exchange
+    token_exchange_endpoint: "http://keycloak:8080/realms/governance/protocol/openid-connect/token"
+    client_id: "ai-gateway"
+    client_secret: os.environ/AI_GATEWAY_CLIENT_SECRET
+    audience: "account-ops"
+
+guardrails:
+  - guardrail_name: governance
+    litellm_params:
+      # 載入此模組時也會把 /governance 路由掛到 LiteLLM 的 app
+      guardrail: ai_gov_gateway.plugin.GovernanceGuardrail
+      mode: pre_mcp_call
+      default_on: true
+  - guardrail_name: m4-spike
+    litellm_params:
+      guardrail: scripts.spikes.m4_hook_probe.SpikeGuardrail
+      mode: [pre_call, post_call]
+      default_on: true
