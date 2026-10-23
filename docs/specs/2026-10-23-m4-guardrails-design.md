@@ -353,6 +353,6 @@ OpenAI 相容的測試 provider，只接內部網路：
 | streaming 的還原 | 文字保留緩衝；tool call 暫存到完整 | 每個 choice 各自處理文字；tool call 暫存到所有含 tool call 的 choice 都結束才還原；多留一個 chunk，串流沒有 `finish_reason` 就結束時暫存文字仍有地方放 | `n > 1` 時其他 choice 的參數可能還沒收完；最後一個 chunk 只帶 usage 時，暫存的文字可能遺失（已知限制） |
 | `streaming_with_pii_unsupported` | S4 不成立時使用 | 未使用 | S4 成立（findings A4） |
 | fallback 的觸發條件 | 只在 429、5xx、逾時與連線錯誤時 | 主力的任何錯誤都會觸發（§9 已改寫） | LiteLLM 沒有依狀態碼限制 fallback 的設定 |
-| fallback 的真實驗證 | 對話中途切換 provider | 整段對話都由 fallback 回應（`config.fallback.yaml` 把 `kyt-main` 指向一律回 503 的 `probe_llm`） | kyt 送出完整歷史，由 LiteLLM 轉成各 provider 的格式，中途切換時 provider 收到的格式與全程使用 fallback 相同。**狀態：路由已驗證，真實模型的回應待驗證（OpenAI 帳戶額度不足），見 findings「真實 LLM 驗證」** |
+| fallback 的真實驗證 | 對話中途切換 provider | 整段對話都由 fallback 回應（`config.fallback.yaml` 把 `kyt-main` 指向一律回 503 的 `probe_llm`） | kyt 送出完整歷史，由 LiteLLM 轉成各 provider 的格式，中途切換時 provider 收到的格式與全程使用 fallback 相同。實測 3 筆都由 `gpt-6-luna` 回應、等級與 Gemini 相同，見 findings「真實 LLM 驗證」第 2 節 |
 | `probe_llm` 的網路 | 只接內部網路 | 綁 `127.0.0.1:8300` | demo 與整合測試要在主機上讀取它記錄的請求 |
 | tpm | （待 S5） | 事後累計、事前比對：超過上限的第一個請求仍放行，之後回 429 | findings A8 |

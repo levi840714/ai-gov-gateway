@@ -333,7 +333,7 @@ LiteLLM 會把錯誤包成 OpenAI 格式：HTTP 狀態碼不變，`error.provide
 - fallback 不檢查 key 的 `models` 與預算，`kyt-agent` 的 key 只列 `kyt-main` 也能用到 `gpt-6-luna`
 - 一次呼叫最多送出主力 2 次、fallback 2 次；kyt 本身也會重試，故障時呼叫量會疊加
 - `kyt-agent` 的 key 設 `tpm_limit: 300000`。用量在回應後才累計：超過上限的那個請求仍會放行，之後的請求回 429
-- 真實模型的驗證：fallback 的路由已確認（主力回 503 後確實改送 OpenAI），`gpt-6-luna` 的實際回應待驗證，因為 OpenAI 帳戶額度不足，見 [findings 的「真實 LLM 驗證」](docs/spikes/m4-findings.md)
+- 真實模型的驗證：讓主力一律回 503 跑 kyt eval 3 筆，每次呼叫都由 `gpt-6-luna` 回應，等級與 Gemini 相同（三筆皆 HIGH），估算成本 $0.0090。只有 3 筆，不代表整批資料的召回率與誤報率，見 [findings 的「真實 LLM 驗證」](docs/spikes/m4-findings.md)
 
 ## 撰寫 policy
 
