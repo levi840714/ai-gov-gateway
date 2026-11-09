@@ -356,3 +356,5 @@ OpenAI 相容的測試 provider，只接內部網路：
 | fallback 的真實驗證 | 對話中途切換 provider | 整段對話都由 fallback 回應（`config.fallback.yaml` 把 `kyt-main` 指向一律回 503 的 `probe_llm`） | kyt 送出完整歷史，由 LiteLLM 轉成各 provider 的格式，中途切換時 provider 收到的格式與全程使用 fallback 相同。實測 3 筆都由 `gpt-6-luna` 回應、等級與 Gemini 相同，見 findings「真實 LLM 驗證」第 2 節 |
 | `probe_llm` 的網路 | 只接內部網路 | 綁 `127.0.0.1:8300` | demo 與整合測試要在主機上讀取它記錄的請求 |
 | tpm | （待 S5） | 事後累計、事前比對：超過上限的第一個請求仍放行，之後回 429 | findings A8 |
+| LLM 請求的 agent 身份（2026-11-10） | key 名稱 `@` 之前的部分；未登記的 agent 套用最嚴格的預設 | key 名稱解析為 `<agent>@<版本>`，`governance.llm` 沿用 `governance.rego` 的 `registered` 與 `agent_active`；名稱格式不符、版本未註冊、agent 未登記都回 403 `unregistered_agent_version`，最嚴格的預設只用於已註冊但沒有 `guardrails` 的 agent；demo 情境 5 改為這兩種 key 被拒絕 | 與 tool 呼叫一致：未註冊的 `kyt-agent@9.9` 原本可以用 kyt 的設定呼叫 LLM |
+| LLM 與 MCP 的 key（2026-11-10） | kyt 的 LLM key 為 `kyt-agent`，MCP key 為 `kyt-agent@1.5`；測試另用 `kyt-agent@llm-demo`、`guard-strict` 與每次新建的 tpm key | 一個 agent 版本一把 key，同時開放 LLM 與 MCP 路由；整合測試、demo 與 `rate_limit_check.py` 改用 `kyt-agent@1.5` 搭配 probe 模型，限流情境前後等 60 秒的固定視窗過去 | LiteLLM 的 `key_alias` 不能重複，同一個版本無法有兩把同名 key；測試不在註冊表加入測試用的版本 |

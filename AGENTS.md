@@ -11,7 +11,7 @@ AI Governance Gateway（`ai-gov-gateway`）：統一治理 agent 的 LLM 流量�
 | M1 | 技術驗證：LiteLLM（LLM + MCP gateway）、Keycloak、OBO，決定 M2 架構 | 完成 |
 | M2 | 治理服務：以 LiteLLM hook 為執行點，OPA policy、maker-checker 審批、稽核 log、高風險 tool | 完成 |
 | M3 | kyt_agent 接入：以 `kyt-agent@1.5` key 呼叫 account_ops 的 `add_to_watchlist`、`file_str`，pending 時中斷，經狀態查詢 API 確認核准後以相同參數重送 | 完成 |
-| M4 | LLM guardrail：tool 結果的注入防護與 spotlighting、PII 假名化（單次請求內可逆）、依 agent 的 OPA 設定；`gpt-6-luna` fallback 與 tpm 限流 | 完成 |
+| M4 | LLM guardrail：tool 結果的注入防護與 spotlighting、PII 假名化（單次請求內可逆）、依 agent 的 OPA 設定；`gpt-6-luna` fallback 與 tpm 限流。LLM 請求與 tool 呼叫共用 `<agent>@<版本>` key，未註冊的版本與 agent 一律拒絕 | 完成 |
 
 ## 目錄結構
 
@@ -45,7 +45,7 @@ ai-gov-gateway/
 
 LiteLLM 固定在 v1.105.1：tool 定義鎖定從此版起才有；`plugin.py` 依賴 `CustomGuardrail` 介面、`litellm.proxy.proxy_server.app`（含已建好的 `middleware_stack`）與 hook 的 `mcp_*` 欄位。
 LLM guardrail 另外依賴 `call_type` 的值（`acompletion`）、`litellm_call_id` 在 pre-call 與 post-call 之間不變、`proxy_server_request.body`，以及 streaming 時不呼叫 success hook（`docs/spikes/m4-findings.md` A1–A6）。
-**升級 LiteLLM 前必須跑 `uv run pytest -m integration`**（含 gateway 與 LLM guardrail 的契約測試），結果須為 31 passed 而非 skipped，並跑 `uv run python -m scripts.demo_m4` 確認 13/13。
+**升級 LiteLLM 前必須跑 `uv run pytest -m integration`**（含 gateway 與 LLM guardrail 的契約測試），結果須為 32 passed 而非 skipped，並跑 `uv run python -m scripts.demo_m4` 確認 13/13。兩者都使用正式的 `kyt-agent@1.5` key 搭配 probe 模型，tpm 情境會等限流視窗過去，各多約 1 分鐘。
 升級後也要重新比對 Presidio 的相依：映像內 `pip freeze` 的既有套件不能被改版。
 
 `engine/` 不 import LiteLLM、FastAPI 與 `config`；依賴方向為 `plugin` / `api` → `runtime` → `engine` / `config`，`runtime` 負責把設定注入引擎。
@@ -89,6 +89,7 @@ docker run --rm -v "$PWD/policies:/policies:ro" openpolicyagent/opa:1.21.1 test 
 - PII 對照表（`PseudonymMap`）只存在 gateway process 的記憶體，不得放進 LiteLLM 的 `data` / `metadata`（會被 callback 記錄）、稽核或日誌；guardrail 的錯誤日誌只記例外類別名稱
 - `llm_guardrail` 稽核只記 PII 類型與數量、規則編號與內容的 sha256，不記原值與 tool 原文
 - 新增 LLM 請求欄位前，確認它會被遮蔽或屬於開發者定義的內容，再加入 `engine/guardrails/fields.py` 的白名單
+- 受治理的 key 一律以 `<agent>@<版本>` 命名並在 `policies/agents/data.json` 的 `versions` 註冊；一個版本一把 key，LLM 與 tool 呼叫共用，兩條路徑都以 `governance.rego` 的 `registered` 判斷。新增 LLM 路徑的檢查時不要只看 `@` 之前的 agent 名稱
 - 受治理的 key 一律設 `allowed_routes`（`scripts/make_keys.py` 的 `LLM_ROUTES`、`MCP_ROUTES`）：provider pass-through、files、threads 不經過 pre-call hook，沒有限制路由就能繞過 guardrail
 
 ## 已知問題

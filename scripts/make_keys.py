@@ -9,36 +9,32 @@ from scripts.env import KEYS_FILE, LITELLM_URL, env
 LLM_ROUTES = {"allowed_routes": ["/v1/chat/completions", "/chat/completions"]}
 MCP_ROUTES = {"allowed_routes": ["mcp_inference_routes"]}
 
-MCP_ACCESS = {
-    **MCP_ROUTES,
-    "object_permission": {
-        "mcp_servers": ["probe", "account_ops"],
-        "mcp_tool_permissions": {
-            "probe": ["whoami", "echo"],
-            "account_ops": ["add_to_watchlist", "freeze_account", "file_str"],
-        },
+# 一個 agent 版本一把 key：LLM 與 MCP 共用，guardrail 與 tool 治理都以 key 名稱比對註冊表
+AGENT_ROUTES = {"allowed_routes": LLM_ROUTES["allowed_routes"] + MCP_ROUTES["allowed_routes"]}
+
+ALL_TOOLS = {
+    "mcp_servers": ["probe", "account_ops"],
+    "mcp_tool_permissions": {
+        "probe": ["whoami", "echo"],
+        "account_ops": ["add_to_watchlist", "freeze_account", "file_str"],
     },
 }
 
 # kyt_agent v1.5 只需要兩個治理動作；不開放 freeze_account，在 LiteLLM 層也維持最小權限
-KYT_V15_ACCESS = {
-    **MCP_ROUTES,
-    "object_permission": {
-        "mcp_servers": ["account_ops"],
-        "mcp_tool_permissions": {"account_ops": ["add_to_watchlist", "file_str"]},
-    },
+KYT_V15_TOOLS = {
+    "mcp_servers": ["account_ops"],
+    "mcp_tool_permissions": {"account_ops": ["add_to_watchlist", "file_str"]},
+}
+
+# 一個 kyt 案件約 13 萬 token，分散在數分鐘內；probe 模型給整合測試與 demo 使用，不花 LLM 費用
+KYT_LLM = {
+    "models": ["kyt-main", "probe-primary", "probe-fallback"],
+    "rpm_limit": 60,
+    "max_budget": 5.0,
+    "tpm_limit": 300000,
 }
 
 KEYS = {
-    # 一個 kyt 案件約 13 萬 token，分散在數分鐘內
-    "kyt-agent": {
-        **LLM_ROUTES,
-        "models": ["kyt-main"],
-        "rpm_limit": 60,
-        "max_budget": 5.0,
-        "tpm_limit": 300000,
-    },
-    "rate-probe": {**LLM_ROUTES, "models": ["kyt-main"], "rpm_limit": 2, "max_budget": 0.05},
     "kyt-agent-mcp": {
         **MCP_ROUTES,
         "object_permission": {
@@ -46,13 +42,11 @@ KEYS = {
             "mcp_tool_permissions": {"probe": ["whoami", "echo"]},
         },
     },
-    "kyt-agent@1.4": MCP_ACCESS,
-    "kyt-agent@1.5": KYT_V15_ACCESS,
-    "kyt-agent@9.9": MCP_ACCESS,
-    # M4 guardrail 的 demo 與整合測試：kyt 的設定、未登記 agent 的預設、tpm
-    "kyt-agent@llm-demo": {**LLM_ROUTES, "models": ["probe-primary", "probe-fallback"]},
-    "guard-strict": {**LLM_ROUTES, "models": ["probe-primary", "probe-fallback"]},
-    "guard-tpm": {**LLM_ROUTES, "models": ["probe-primary"], "tpm_limit": 1000},
+    "kyt-agent@1.4": {**AGENT_ROUTES, **KYT_LLM, "object_permission": ALL_TOOLS},
+    "kyt-agent@1.5": {**AGENT_ROUTES, **KYT_LLM, "object_permission": KYT_V15_TOOLS},
+    # 未註冊的版本與未登記的 agent：demo 與整合測試確認 LLM 與 tool 呼叫都被拒絕
+    "kyt-agent@9.9": {**AGENT_ROUTES, "models": ["probe-primary"], "object_permission": ALL_TOOLS},
+    "unknown-agent@1.0": {**LLM_ROUTES, "models": ["probe-primary"]},
 }
 
 
@@ -64,6 +58,16 @@ def create_key(alias: str, body: dict) -> str:
     )
     response.raise_for_status()
     return str(response.json()["key"])
+
+
+def delete_key(key: str) -> None:
+    response = httpx.post(
+        f"{LITELLM_URL}/key/delete",
+        headers={"Authorization": f"Bearer {env('LITELLM_MASTER_KEY')}"},
+        json={"keys": [key]},
+    )
+    if response.status_code != 404:
+        response.raise_for_status()
 
 
 def update_key(key: str, body: dict) -> bool:
@@ -82,6 +86,10 @@ def update_key(key: str, body: dict) -> bool:
 if __name__ == "__main__":
     KEYS_FILE.parent.mkdir(exist_ok=True)
     stored = json.loads(KEYS_FILE.read_text()) if KEYS_FILE.exists() else {}
+    # 不在 KEYS 裡的 key 一併刪除，停用的 key 不留在 LiteLLM
+    for alias in sorted(set(stored) - set(KEYS)):
+        delete_key(stored.pop(alias))
+        KEYS_FILE.write_text(json.dumps(stored, indent=2))
     for alias, body in KEYS.items():
         if alias not in stored or not update_key(stored[alias], body):
             stored[alias] = create_key(alias, body)

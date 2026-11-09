@@ -1,6 +1,6 @@
 package governance
 
-# LLM guardrail 的設定；未登記或未設定 guardrails 的 agent 套用最嚴格的預設
+# LLM guardrail 的設定；已註冊但未設定 guardrails 的 agent 套用最嚴格的預設
 # guardrails 欄位不完整時 llm 為 undefined，gateway 視為 policy_error 而拒絕
 strict_guardrails := {
 	"pii": {
@@ -10,12 +10,12 @@ strict_guardrails := {
 	"injection": {"action": "deny", "system_notice": true},
 }
 
-# agent 定義在 governance.rego：data.agents[input.agent.id]
-llm_agent_status := "active" if {
-	agent.status == "active"
+# registered、agent_active 定義在 governance.rego，與 tool 呼叫採同樣的判斷順序
+llm_agent_status := "unregistered" if {
+	not registered
 } else := "suspended" if {
-	agent
-} else := "unregistered"
+	not agent_active
+} else := "active"
 
 llm_guardrails := agent.guardrails if {
 	is_object(agent.guardrails)

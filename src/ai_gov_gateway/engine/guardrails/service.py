@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol, TypeVar
 
 from ai_gov_gateway.engine.clock import Clock, utc_now
-from ai_gov_gateway.engine.fingerprint import sha256_hex
+from ai_gov_gateway.engine.fingerprint import parse_agent_key, sha256_hex
 from ai_gov_gateway.engine.guardrails.injection import (
     REDACTED,
     SYSTEM_NOTICE,
@@ -21,7 +21,7 @@ from ai_gov_gateway.engine.guardrails.models import (
     InjectionFinding,
 )
 from ai_gov_gateway.engine.guardrails.pii import PiiDetector, Pseudonymizer, PseudonymMap
-from ai_gov_gateway.engine.models import AuditEvent
+from ai_gov_gateway.engine.models import AgentRef, AuditEvent
 from ai_gov_gateway.engine.policy import PolicyError
 from ai_gov_gateway.engine.store import GovernanceStore, StoreError, StoreUnavailable
 
@@ -35,12 +35,7 @@ T = TypeVar("T")
 
 
 class GuardrailPolicy(Protocol):
-    async def llm_config(self, agent_id: str) -> GuardrailConfig: ...
-
-
-def agent_of(key_alias: str | None) -> str:
-    """LLM key 與 MCP key 都以 @ 之前的部分作為 agent，例如 kyt-agent 與 kyt-agent@1.5。"""
-    return key_alias.split("@", 1)[0] if key_alias else ""
+    async def llm_config(self, agent: AgentRef) -> GuardrailConfig: ...
 
 
 @dataclass
@@ -78,8 +73,13 @@ class LlmGuardrail:
         messages: list[Message],
     ) -> GuardedRequest:
         """一律 fail-closed：設定、偵測或稽核任一步失敗都拒絕請求。"""
-        agent_id = agent_of(key_alias)
-        config = await self._config(agent_id)
+        # 與 tool 呼叫共用同一把 `<agent>@<版本>` key，名稱格式不符就不可能已註冊
+        agent = parse_agent_key(key_alias)
+        if agent is None:
+            raise GuardrailError(403, "unregistered_agent_version")
+        config = await self._config(agent)
+        if config.agent_status == "unregistered":
+            raise GuardrailError(403, "unregistered_agent_version")
         if config.agent_status == "suspended":
             raise GuardrailError(403, "agent_suspended")
         if not isinstance(messages, list) or not all(isinstance(m, dict) for m in messages):
@@ -89,7 +89,7 @@ class LlmGuardrail:
         labels = _tool_labels(messages)
         findings = await self._offload(self._screen_tools, messages, labels, config)
         injected = sorted({f.rule for f in findings if f.rule != HIDDEN_RULE})
-        audit = _Audit(agent_id, key_alias, model, call_id, findings, config, self._rules.version)
+        audit = _Audit(agent.id, key_alias, model, call_id, findings, config, self._rules.version)
         if injected and config.injection.action == "deny":
             await self._write(audit.event("deny", PseudonymMap()))
             raise GuardrailError(400, "prompt_injection_detected", rules=injected)
@@ -102,9 +102,9 @@ class LlmGuardrail:
             await self._write(audit.event(decision, pseudonyms))
         return GuardedRequest(messages=messages, pseudonyms=pseudonyms)
 
-    async def _config(self, agent_id: str) -> GuardrailConfig:
+    async def _config(self, agent: AgentRef) -> GuardrailConfig:
         try:
-            return await self._policy.llm_config(agent_id)
+            return await self._policy.llm_config(agent)
         except PolicyError as error:
             code = "policy_unavailable" if error.code == "policy_unavailable" else "policy_error"
             raise GuardrailError(503, code) from error
@@ -201,7 +201,7 @@ class _Audit:
     def event(self, decision: str, pseudonyms: PseudonymMap) -> AuditEvent:
         return AuditEvent(
             event_type="llm_guardrail",
-            agent_id=self.agent_id or None,
+            agent_id=self.agent_id,
             key_alias=self.key_alias,
             decision=decision,
             reasons=sorted({f.rule for f in self.findings}),

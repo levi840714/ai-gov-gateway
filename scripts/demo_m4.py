@@ -3,7 +3,6 @@
 import json
 import sys
 import time
-import uuid
 from typing import Any
 
 import httpx
@@ -15,11 +14,18 @@ from ai_gov_gateway.engine.guardrails.injection import (
     spotlight,
 )
 from scripts.demo_m2 import api, compose, psql
-from scripts.env import LITELLM_URL, ROOT, env
-from scripts.llm_sim import chat, clear_probe, probe_requests, stream_text, tool_turn
-from scripts.make_keys import LLM_ROUTES
+from scripts.env import ROOT
+from scripts.llm_sim import (
+    AGENT_KEY,
+    chat,
+    clear_probe,
+    exceed_tpm,
+    probe_requests,
+    stream_text,
+    tool_turn,
+)
 
-KEY = "kyt-agent@llm-demo"
+KEY = AGENT_KEY
 TW_ID = "A123456789"
 EMAIL = "amy.chen@example.com"
 ADDRESS = "0x1111111111111111111111111111111111111111"
@@ -92,44 +98,6 @@ def wait_until_ready() -> None:
     raise RuntimeError("gateway did not recover within 60s")
 
 
-def tpm_statuses() -> list[int]:
-    master = {"Authorization": f"Bearer {env('LITELLM_MASTER_KEY')}"}
-    created = httpx.post(
-        f"{LITELLM_URL}/key/generate",
-        headers=master,
-        json={
-            "key_alias": f"demo-tpm-{uuid.uuid4().hex[:6]}",
-            "models": ["probe-primary"],
-            "tpm_limit": 1000,
-            **LLM_ROUTES,
-        },
-        timeout=30,
-    )
-    created.raise_for_status()
-    key = created.json()["key"]
-    body = {
-        "model": "probe-primary",
-        "messages": [
-            {"role": "system", "content": "probe:usage=5000"},
-            {"role": "user", "content": "x"},
-        ],
-    }
-    try:
-        return [
-            httpx.post(
-                f"{LITELLM_URL}/v1/chat/completions",
-                headers={"Authorization": f"Bearer {key}"},
-                json=body,
-                timeout=30,
-            ).status_code
-            for _ in range(3)
-        ]
-    finally:
-        httpx.post(
-            f"{LITELLM_URL}/key/delete", headers=master, json={"keys": [key]}, timeout=30
-        ).raise_for_status()
-
-
 def main() -> int:
     clear_probe()
 
@@ -179,11 +147,13 @@ def main() -> int:
         delivered,
     )
 
-    response = chat("guard-strict", tool_turn(ATTACK))
+    clear_probe()
+    responses = [chat(key, tool_turn(ATTACK)) for key in ("kyt-agent@9.9", "unknown-agent@1.0")]
     check(
-        "5 未登記設定的 agent：拒絕",
-        response.status_code == 400 and "prompt_injection_detected" in response.text,
-        response.status_code,
+        "5 未註冊的版本與未登記的 agent：拒絕，不送到 provider",
+        all(r.status_code == 403 and "unregistered_agent_version" in r.text for r in responses)
+        and probe_requests() == [],
+        [r.status_code for r in responses],
     )
 
     hidden = "交易對手\u200b 0x2222222222222222222222222222222222222222"
@@ -235,8 +205,9 @@ def main() -> int:
         models,
     )
 
-    statuses = tpm_statuses()
-    check("10 超過 tpm 回 429", statuses == [200, 429, 429], statuses)
+    # 用量在回應後才累計，緊接的請求可能仍放行，見 tests/integration 的 test_tpm_limit_returns_429
+    statuses = exceed_tpm()
+    check("10 超過 tpm 回 429", statuses[0] == 200 and 429 in statuses[1:], statuses)
 
     try:
         compose("stop", "opa")

@@ -3,7 +3,7 @@ import json
 import httpx
 import pytest
 
-from ai_gov_gateway.engine.models import Decision
+from ai_gov_gateway.engine.models import AgentRef, Decision
 from ai_gov_gateway.engine.policy import OpaPolicyClient, PolicyError
 
 
@@ -72,6 +72,7 @@ async def test_unserializable_input_is_policy_error():
     assert error.value.code == "policy_error"
 
 
+KYT_V15 = AgentRef(id="kyt-agent", version="1.5", key_alias="kyt-agent@1.5")
 LLM_RESULT = {
     "agent_status": "active",
     "pii": {"entities": ["EMAIL"], "exclude": ["eth_address"]},
@@ -89,10 +90,12 @@ async def test_llm_config_posts_agent_and_parses_result():
         seen["body"] = json.loads(request.content)
         return httpx.Response(200, json={"result": LLM_RESULT})
 
-    config = await _client(handler).llm_config("kyt-agent")
+    config = await _client(handler).llm_config(KYT_V15)
     assert seen == {
         "path": "/v1/data/governance/llm",
-        "body": {"input": {"agent": {"id": "kyt-agent"}}},
+        "body": {
+            "input": {"agent": {"id": "kyt-agent", "version": "1.5", "key_alias": "kyt-agent@1.5"}}
+        },
     }
     assert config.injection.action == "redact"
     assert config.pii.exclude == ["eth_address"]
@@ -109,7 +112,7 @@ async def test_llm_config_posts_agent_and_parses_result():
 async def test_llm_config_rejects_missing_or_unsupported_result(result):
     client = _client(lambda request: httpx.Response(200, json={"result": result} if result else {}))
     with pytest.raises(PolicyError) as error:
-        await client.llm_config("kyt-agent")
+        await client.llm_config(KYT_V15)
     assert error.value.code == "policy_error"
 
 
@@ -118,5 +121,5 @@ async def test_llm_config_reports_unavailable_opa():
         raise httpx.ConnectError("down")
 
     with pytest.raises(PolicyError) as error:
-        await _client(handler).llm_config("kyt-agent")
+        await _client(handler).llm_config(KYT_V15)
     assert error.value.code == "policy_unavailable"

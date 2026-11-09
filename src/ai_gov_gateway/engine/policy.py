@@ -3,7 +3,7 @@ from typing import Any, Protocol
 import httpx
 
 from ai_gov_gateway.engine.guardrails.models import GuardrailConfig
-from ai_gov_gateway.engine.models import PolicyDecision
+from ai_gov_gateway.engine.models import AgentRef, PolicyDecision
 
 
 class PolicyError(Exception):
@@ -34,8 +34,8 @@ class OpaPolicyClient:
         except ValueError as error:
             raise PolicyError("policy_error") from error
 
-    async def llm_config(self, agent_id: str) -> GuardrailConfig:
-        result = await self._query(self.LLM_PATH, {"agent": {"id": agent_id}})
+    async def llm_config(self, agent: AgentRef) -> GuardrailConfig:
+        result = await self._query(self.LLM_PATH, {"agent": agent.model_dump()})
         try:
             return GuardrailConfig.model_validate(result)
         except ValueError as error:

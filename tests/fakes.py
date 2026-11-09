@@ -7,6 +7,7 @@ from typing import Any
 from ai_gov_gateway.engine.audit import GENESIS_HASH, build_record
 from ai_gov_gateway.engine.guardrails.models import GuardrailConfig, PiiSpan
 from ai_gov_gateway.engine.models import (
+    AgentRef,
     Approval,
     ApprovalStatus,
     AuditEvent,
@@ -163,10 +164,10 @@ class FakeGuardrailPolicy:
     def __init__(self, config: GuardrailConfig | None = None) -> None:
         self.config = config or guardrail_config()
         self.error: str | None = None
-        self.agents: list[str] = []
+        self.agents: list[AgentRef] = []
 
-    async def llm_config(self, agent_id: str) -> GuardrailConfig:
-        self.agents.append(agent_id)
+    async def llm_config(self, agent: AgentRef) -> GuardrailConfig:
+        self.agents.append(agent)
         if self.error is not None:
             raise PolicyError(self.error)
         return self.config

@@ -48,7 +48,7 @@ agent 執行有副作用的動作（例如凍結帳戶、送出申報）之前�
 
 身份與授權：
 
-- **agent 版本控管**：virtual key 以 `<agent>@<版本>` 命名，只有註冊過的版本能呼叫；改版就要重新審核
+- **agent 版本控管**：virtual key 以 `<agent>@<版本>` 命名，LLM 與 tool 呼叫共用同一把，只有註冊過的版本能呼叫；改版就要重新審核
 - **委託授權**：驗證使用者的 OIDC token，再透過 OAuth token exchange（RFC 8693）換成只能給特定下游使用的 token
 - **policy as code**：用 OPA（Rego）寫規則，依參數值決定放行、拒絕或送審；規則和資料由治理團隊用 GitOps 維護
 - **最小權限的 key**：每把 key 限定可用的模型、MCP tool 與路由，provider pass-through 等繞過 guardrail 的路由一律擋下
@@ -157,17 +157,17 @@ uv run python -m scripts.demo_m4
 | 2 | 模型回傳的 tool call 參數含 `<EMAIL_1>`，原值帶引號 | agent 收到合法的 JSON 與原值 |
 | 3 | Ethereum 地址與交易 hash | 不被假名化 |
 | 4 | kyt 的 tool 結果含中文覆寫指令 | 內容換成固定文字，寫入稽核 |
-| 5 | 同樣內容，沒有 guardrail 設定的 agent | `400 prompt_injection_detected` |
+| 5 | 同樣內容，未註冊的版本 `kyt-agent@9.9` 與未登記的 agent `unknown-agent@1.0` | `403 unregistered_agent_version`，provider 沒收到請求 |
 | 6 | tool 結果含零寬字元 | 被移除，稽核記為 `hidden.chars` |
 | 7 | tool 結果試圖提前關閉邊界 | 內容被移除，邊界維持完整 |
 | 8 | 一般的 kyt 工具輸出 | 沒有任何發現，也沒有稽核紀錄 |
 | 9 | 主力模型回 503 | 由 fallback 回應，fallback 收到的也是假名化後的內容 |
-| 10 | 超過 tpm 上限 | 第一次 200，之後 429 |
+| 10 | 超過 tpm 上限 | 第一次 200，之後 429（用量在回應後才累計，緊接的下一個請求可能仍是 200） |
 | 11 | OPA 停止運作 | `503 policy_unavailable` |
 | 12 | streaming 回應中代號被切成兩段 | 正確還原 |
 | 13 | 驗證稽核 | hash chain 完整，資料庫中找不到 PII 原值 |
 
-過程中腳本會暫時停止 OPA，並建立一把用完即刪的 tpm 測試 key。
+過程中腳本會暫時停止 OPA。情境都使用正式的 `kyt-agent@1.5` key 搭配 probe 模型；tpm 情境會讓這把 key 被限流，腳本等 60 秒的計數視窗過去、再次放行後才繼續，因此多花約 1 分鐘。
 
 Keycloak 裡的測試帳號有 `alice`（分析師）、`bob`（Supervisor）、`carol`（兩種角色都有）。這些帳號和 client secret 都是 `keycloak/realm-governance.json` 裡的測試值，只能在本機使用。
 
@@ -186,7 +186,7 @@ agent 用 MCP client 連到 `http://localhost:4000/mcp`，並帶上兩個 header
 
 收到 `pending_approval` 時，agent 記下 `approval_id`，等 Supervisor 核准後，用一模一樣的參數再送一次就好，不需要額外的參數。重送前可以用委託人的 token 呼叫 `GET /governance/approvals/{id}/status` 確認是否已核准，避免在待審期間重送。可以參考 [`scripts/agent_sim.py`](scripts/agent_sim.py)；實際接入的例子是 kyt_agent v1.5。
 
-LLM 的請求用 OpenAI 相容格式送到 `http://localhost:4000/v1/chat/completions`，模型名稱用 `litellm/config.yaml` 裡定義的別名。LLM key 只能呼叫 chat completions，請求內容會經過 [LLM guardrail](#llm-guardrail)。
+LLM 的請求用 OpenAI 相容格式送到 `http://localhost:4000/v1/chat/completions`，模型名稱用 `litellm/config.yaml` 裡定義的別名。LLM 與 tool 呼叫用同一把 agent 版本的 key（`Authorization: Bearer <key>`），例如 kyt_agent 的 `LLM_API_KEY` 與 `GATEWAY_API_KEY` 都填 `kyt-agent@1.5` 的 key。版本未註冊或 agent 未登記時回 `403 unregistered_agent_version`，與 tool 呼叫相同。受治理的 key 只能呼叫 chat completions 與 MCP，請求內容會經過 [LLM guardrail](#llm-guardrail)。
 
 ### 用 `agw` CLI 審批
 
@@ -245,7 +245,7 @@ agent 的調查工具多半在本地執行，外部資料（鏈上字串、文�
 
 1. 只接受 chat completions（call type 為 `acompletion`），其他呼叫回 `400 call_type_not_governed`
 2. 檢查請求欄位：guardrail 只處理訊息內容與 tool 參數，白名單以外的欄位回 `400 unsupported_field`
-3. 向 OPA 查詢這個 agent 的設定；agent 已停用時回 `403 agent_suspended`
+3. 從 key 名稱解析出 agent 與版本（`<agent>@<版本>`），向 OPA 查詢註冊狀態與 guardrail 設定：名稱格式不符、版本未註冊或 agent 未登記時回 `403 unregistered_agent_version`（格式不符時不查 OPA），agent 已停用時回 `403 agent_suspended`
 4. 檢查大小：單則訊息超過 `GOV_GUARDRAIL_MAX_CHARS`、整個請求超過 `GOV_GUARDRAIL_MAX_TOTAL_CHARS` 時拒絕，不截斷
 5. tool 結果（`role: tool` 與舊版的 `function`）先正規化：移除零寬、雙向控制等不可見字元，再做 NFKC
 6. 以 `guardrails/injection_rules.json` 的規則比對正規化後的 tool 結果，依 agent 設定處理
@@ -272,7 +272,7 @@ agent 的調查工具多半在本地執行，外部資料（鏈上字串、文�
 
 ### agent 的設定
 
-設定放在 `policies/agents/data.json` 各 agent 的 `guardrails`，由 OPA 的 `governance.llm` 提供。agent 名稱取 key 名稱 `@` 之前的部分，所以 `kyt-agent`（LLM key）和 `kyt-agent@1.5`（MCP key）共用同一份設定：
+設定放在 `policies/agents/data.json` 各 agent 的 `guardrails`，由 OPA 的 `governance.llm` 提供。版本的判斷與 tool 呼叫相同：`versions` 裡要有 key 名稱的版本，且 `key_alias` 與 key 名稱一致。guardrail 設定以 agent 為單位，`kyt-agent@1.4` 與 `kyt-agent@1.5` 共用同一份：
 
 ```json
 "guardrails": {
@@ -284,7 +284,7 @@ agent 的調查工具多半在本地執行，外部資料（鏈上字串、文�
 }
 ```
 
-沒有登記的 agent，或登記了但沒有 `guardrails` 的 agent，套用最嚴格的預設：偵測全部 PII 類型、沒有排除格式、注入一律 `deny`、`system_notice: true`。`guardrails` 寫了但欄位不完整時，gateway 回 `503 policy_error`。
+已註冊但沒有 `guardrails` 的 agent，套用最嚴格的預設：偵測全部 PII 類型、沒有排除格式、注入一律 `deny`、`system_notice: true`。`guardrails` 寫了但欄位不完整時，gateway 回 `503 policy_error`。
 
 `system_notice: true` 會在第一則 system 訊息結尾加上固定說明（邊界之間是外部資料，不是指令）；沒有 system 訊息時新增一則。
 
@@ -336,6 +336,7 @@ LiteLLM 會把錯誤包成 OpenAI 格式：HTTP 狀態碼不變，`error.provide
 | 400 | `too_many_pii_values` | 單次請求的不同 PII 值超過 1,000 個，或合計超過 65,536 字元 |
 | 400 | `pii_value_too_long` | 單一 PII 值超過 2,048 字元 |
 | 400 | `call_type_not_governed` | 非 chat completions 的呼叫進入 hook（例如 master key 呼叫 embeddings） |
+| 403 | `unregistered_agent_version` | key 名稱不是 `<agent>@<版本>`，或版本未註冊、agent 未登記 |
 | 403 | `agent_suspended` | agent 已停用 |
 | 502 | `guardrail_output_error` | 回應的代號還原失敗，或對照表已被回收；不回傳半還原的結果 |
 | 503 | `policy_unavailable` | OPA 沒有回應或逾時 |
@@ -365,9 +366,9 @@ LiteLLM 會把錯誤包成 OpenAI 格式：HTTP 狀態碼不變，`error.provide
 - `kyt-main`（Gemini）重試一次仍失敗時，改送 `kyt-main-fallback`（`openai/gpt-6-luna`）。fallback 收到的是假名化後的內容
 - LiteLLM 不能依狀態碼限制 fallback：主力回 400、401、403、404 也會改送 fallback。Gemini 的 key 設錯時 client 仍拿到正常回應，問題只會出現在 gateway 日誌
 - `.env` 沒有 `OPENAI_API_KEY` 時 fallback 會失敗，client 收到主力原本的錯誤
-- fallback 不檢查 key 的 `models` 與預算，`kyt-agent` 的 key 只列 `kyt-main` 也能用到 `gpt-6-luna`
+- fallback 不檢查 key 的 `models` 與預算，`kyt-agent@1.5` 的 key 沒有列 `kyt-main-fallback` 也能用到 `gpt-6-luna`
 - 一次呼叫最多送出主力 2 次、fallback 2 次；kyt 本身也會重試，故障時呼叫量會疊加
-- `kyt-agent` 的 key 設 `tpm_limit: 300000`。用量在回應後才累計：超過上限的那個請求仍會放行，之後的請求回 429
+- `kyt-agent@1.4`、`kyt-agent@1.5` 的 key 設 `tpm_limit: 300000`、`rpm_limit: 60`。用量在回應後才累計：超過上限的那個請求仍會放行，之後的請求回 429
 - 真實模型的驗證：讓主力一律回 503 跑 kyt eval 3 筆，每次呼叫都由 `gpt-6-luna` 回應，等級與 Gemini 相同（三筆皆 HIGH），估算成本 $0.0090。只有 3 筆，不代表整批資料的召回率與誤報率，見 [findings 的「真實 LLM 驗證」](docs/spikes/m4-findings.md)
 
 ## 撰寫 policy
@@ -377,7 +378,7 @@ LiteLLM 會把錯誤包成 OpenAI 格式：HTTP 狀態碼不變，`error.provide
 ```
 policies/
 ├── governance.rego          # 規則：先依序檢查拒絕條件，再收集送審原因
-├── governance_llm.rego      # LLM guardrail 的設定（governance.llm）與未登記 agent 的預設
+├── governance_llm.rego      # LLM guardrail 的設定（governance.llm），版本註冊與停用沿用 governance.rego 的判斷
 ├── governance_test.rego、governance_llm_test.rego  # Rego 測試，包含資料完整性檢查
 ├── agents/data.json         # agent 註冊表：負責人、狀態、能承擔的風險等級、核准的版本與 key、guardrail 設定
 ├── tools/data.json          # 各 tool 的風險等級與門檻
@@ -395,7 +396,7 @@ policies/
 
 常見的操作：
 
-- 上線新的 agent 版本：在 `agents/data.json` 的 `versions` 加上 `key_alias`，再建立同名的 virtual key（`scripts/make_keys.py` 會建立缺少的 key，並以 `/key/update` 同步既有 key 的權限）。目前註冊的是 `kyt-agent@1.4` 與 `kyt-agent@1.5`；`kyt-agent@1.5` 的 key 只開放 `account_ops` 的 `add_to_watchlist` 與 `file_str`
+- 上線新的 agent 版本：在 `agents/data.json` 的 `versions` 加上 `key_alias`，再建立同名的 virtual key，LLM 與 tool 呼叫共用這一把（`scripts/make_keys.py` 會建立缺少的 key、以 `/key/update` 同步既有 key 的權限，並刪除不在清單裡的 key）。目前註冊的是 `kyt-agent@1.4` 與 `kyt-agent@1.5`，兩把 key 都能呼叫 `kyt-main` 與測試用的 probe 模型；`kyt-agent@1.5` 的 key 只開放 `account_ops` 的 `add_to_watchlist` 與 `file_str`
 - 修改規則：記得更新 `meta/data.json` 的 `policy_version`，送 PR 前先跑下面三個指令
 - 修改注入規則（`guardrails/injection_rules.json`，不在 `policies/` 裡）：更新檔案中的 `rules_version`，並跑 `uv run pytest tests/test_guardrail_injection.py`，其中包含以 kyt 實際工具輸出做的誤判測試。規則檔在 gateway 啟動時載入，改完要重建映像
 
@@ -498,14 +499,14 @@ uv run mypy src
 
 | 測試 | 數量 | 涵蓋範圍 |
 | ---- | ---- | -------- |
-| 單元測試 | 406 | 引擎、審批、token 驗證、稽核、API、CLI、hook 轉接；LLM guardrail 的注入規則（含 kyt 工具輸出的誤判語料與 20 萬字元的計時測試）、PII 偵測與假名化、請求欄位、還原與 streaming |
-| 整合測試 | 31 | Postgres store 12（含並行寫入與數值精確度）、gateway 與 LiteLLM 的介面契約 7（含狀態查詢 API）、LLM guardrail 的 hook 契約 12（改寫與還原、streaming、路由限制、fallback、tpm） |
-| Rego 測試 | 42 | 每條規則、欄位缺漏或資料錯誤時的預設拒絕、資料完整性、LLM guardrail 的預設與設定驗證 |
+| 單元測試 | 412 | 引擎、審批、token 驗證、稽核、API、CLI、hook 轉接；LLM guardrail 的注入規則（含 kyt 工具輸出的誤判語料與 20 萬字元的計時測試）、PII 偵測與假名化、請求欄位、還原與 streaming |
+| 整合測試 | 32 | Postgres store 12（含並行寫入與數值精確度）、gateway 與 LiteLLM 的介面契約 7（含狀態查詢 API）、LLM guardrail 的 hook 契約 13（改寫與還原、未註冊的版本與 agent、streaming、路由限制、fallback、tpm） |
+| Rego 測試 | 45 | 每條規則、欄位缺漏或資料錯誤時的預設拒絕、資料完整性、LLM guardrail 的版本註冊、預設與設定驗證 |
 | 端到端示範 | 13 + 13 個情境 | `scripts/demo_m2.py`、`scripts/demo_m4.py` |
 
 整合測試會用 `.env` 裡的 `GOV_TEST_DATABASE_URL` 連到 `governance_test` 資料庫。測試會刪除資料表，所以資料庫名稱不是以 `_test` 結尾時會直接跳過。
 
-LLM guardrail 的契約測試需要 `probe_llm` 與 `scripts.make_keys` 建立的 `kyt-agent@llm-demo`、`guard-strict` key。
+LLM guardrail 的契約測試需要 `probe_llm` 與 `scripts.make_keys` 建立的 `kyt-agent@1.5`、`kyt-agent@9.9`、`unknown-agent@1.0` key。tpm 測試會讓 `kyt-agent@1.5` 被限流，測試前後都等到再次放行，整合測試因此多花約 1 分鐘。
 
 升級 LiteLLM 前一定要先跑整合測試與 `demo_m4`。治理 hook 依賴 LiteLLM 的 guardrail 介面、欄位名稱與 hook 的呼叫順序，這些一有變動，介面契約測試就會失敗。
 
@@ -532,7 +533,8 @@ LLM guardrail：
 - 只有 tool 結果會正規化。其他訊息被零寬字元拆開的 email 不會被遮蔽
 - 只偵測固定格式的 PII，人名、地址不會被假名化；圖片等非文字內容不掃描
 - `user` 欄位，以及 `tools` 的描述、`response_format` 的 schema、`stop`、tool 名稱不遮蔽，這些視為開發者定義的內容；`image_url` 只接受 `url` 與 `detail`，URL 本身不遮蔽
-- LLM guardrail 的 agent 身份只取 key 名稱 `@` 之前的部分，不看 M2 的 `versions` 註冊表：例如未註冊的 `kyt-agent@9.9` 呼叫 LLM 時也套用 kyt 的設定（MCP 呼叫仍會被 M2 拒絕）
+- LLM 請求因版本未註冊或 agent 已停用被拒絕時不寫稽核（tool 呼叫的拒絕會寫），只留下 LiteLLM 的錯誤日誌
+- 整合測試、`demo_m4` 與 `scripts/rate_limit_check.py` 使用正式的 `kyt-agent@1.5` key 搭配 probe 模型，rpm 與 tpm 也與真實的 kyt 調查共用；限流情境會讓這把 key 約 1 分鐘內回 429，不要和真實調查同時執行
 - 欄位白名單也會拒絕 `presence_penalty`、`logprobs`、`reasoning_effort`、`cache_control` 等正常參數，需要時再加入 `engine/guardrails/fields.py`
 - 受治理的 key 只能呼叫 chat completions：`/v1/models`、Azure 風格的路由、provider pass-through 都會被擋
 - 含 PII 的 tool call id 遮蔽後含有 `<` `>`，部分 provider 會以 400 拒絕

@@ -1,20 +1,15 @@
-import json
+"""確認 key 的 rpm 限制：對 probe 模型送出 rpm_limit + 1 次，最後一次應回 429，不花 LLM 費用。"""
 
-import httpx
+from collections import Counter
 
-from scripts.env import KEYS_FILE, LITELLM_URL
+from scripts.llm_sim import AGENT_KEY, chat, wait_until_allowed
+from scripts.make_keys import KEYS
 
 if __name__ == "__main__":
-    key = json.loads(KEYS_FILE.read_text())["rate-probe"]
-    for attempt in range(1, 4):
-        response = httpx.post(
-            f"{LITELLM_URL}/v1/chat/completions",
-            headers={"Authorization": f"Bearer {key}"},
-            json={
-                "model": "kyt-main",
-                "messages": [{"role": "user", "content": "Hi"}],
-                "max_tokens": 5,
-            },
-            timeout=60,
-        )
-        print(attempt, response.status_code, response.text[:160].replace("\n", " "))
+    limit = KEYS[AGENT_KEY]["rpm_limit"]
+    messages = [{"role": "system", "content": "probe:reply=ok"}, {"role": "user", "content": "Hi"}]
+    wait_until_allowed(AGENT_KEY)
+    statuses = [chat(AGENT_KEY, messages).status_code for _ in range(limit + 1)]
+    print(f"{AGENT_KEY} rpm_limit={limit}:", dict(Counter(statuses)), "last:", statuses[-1])
+    print("waiting for the rate limit window to pass...")
+    wait_until_allowed(AGENT_KEY)
