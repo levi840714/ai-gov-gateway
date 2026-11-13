@@ -112,20 +112,23 @@ class LlmGate:
             max_tokens=limits.max_output_tokens if inject else None,
         )
 
-    async def settle(self, settlement: Settlement) -> None:
-        # 回應已送出，無法再拒絕；遺失的結算由對帳補上
+    async def settle(self, settlement: Settlement) -> bool:
+        """回傳是否寫入帳本；回應已送出，無法再拒絕，遺失的結算由對帳補上。"""
         try:
-            await self._ledger.settle(settlement, self._tz, _limit_exceeded_event)
+            overage = await self._ledger.settle(settlement, self._tz, _limit_exceeded_event)
         except Exception as error:
             logger.error("llm usage settlement failed: %s", type(error).__name__)
+            return False
+        return overage is not None
 
-    async def release(self, owner: str | None, call_id: object) -> None:
+    async def release(self, owner: str | None, call_id: object) -> bool:
         if owner is None or not isinstance(call_id, str) or not call_id:
-            return
+            return False
         try:
-            await self._ledger.release(owner, call_id)
+            return await self._ledger.release(owner, call_id)
         except Exception as error:
             logger.error("llm usage release failed: %s", type(error).__name__)
+            return False
 
     async def _authenticate(self, caller: _Caller) -> UserIdentity:
         token = caller.request.user_token
