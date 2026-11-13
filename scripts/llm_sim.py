@@ -47,9 +47,10 @@ def chat(
 # 等待與超過 key 限流用的請求：模型沒有 fallback，LiteLLM 限流時只會跑一次 pre-call 並釋放。
 # probe-primary 會觸發限流 fallback，第二個 call_id 收不到事件（M5 spike B5），留在帳本佔同時進行數
 LIMIT_MODEL = "probe-fallback"
-# 等待用 bob、超過 tpm 用 carol：不消耗 alice 的個人 rpm，tpm 也不會鎖住 demo 與測試的主要使用者
+# 等待用 bob：不消耗 alice 的個人 rpm。超過 tpm 的每一筆換一位使用者：放行的那筆也會超過
+# 該使用者的個人 tpm（M5），下一筆若同一人會被 gateway 擋下，就看不到 key 的限流
 WAIT_USER = "bob"
-TPM_USER = "carol"
+TPM_USERS = ("carol", "bob", "alice")
 
 
 def key_limited(response: httpx.Response) -> bool:
@@ -70,20 +71,18 @@ def wait_until_allowed(key_alias: str, timeout: float = 90, user: str = WAIT_USE
         time.sleep(10)
 
 
-def exceed_tpm(key_alias: str = AGENT_KEY, attempts: int = 3) -> list[httpx.Response]:
-    """每次回報的用量都超過 key 的 tpm；前後都等限流解除，不影響之後的請求。
-
-    第一筆的使用者也會超過個人 tpm（M5），之後改由另一位使用者送出，429 才來自 key 的限流。
-    """
+def exceed_tpm(key_alias: str = AGENT_KEY) -> list[httpx.Response]:
+    """每次回報的用量都超過 key 的 tpm；前後都等限流解除，不影響之後的請求。"""
     usage = KEYS[key_alias]["tpm_limit"] + 1
     messages = [
         {"role": "system", "content": f"probe:usage={usage}"},
         {"role": "user", "content": "x"},
     ]
-    users = [TPM_USER] + [WAIT_USER] * (attempts - 1)
-    wait_until_allowed(key_alias)
+    # 連續執行時，上一輪使用者的個人 tpm（滑動視窗）可能比 key 的固定視窗晚解除
+    for user in TPM_USERS:
+        wait_until_allowed(key_alias, user=user)
     try:
-        return [chat(key_alias, messages, model=LIMIT_MODEL, user=user) for user in users]
+        return [chat(key_alias, messages, model=LIMIT_MODEL, user=user) for user in TPM_USERS]
     finally:
         wait_until_allowed(key_alias)
 
