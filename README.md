@@ -13,7 +13,7 @@ AI Governance Gateway 是 AI agent 存取 LLM 與工具的統一治理入口。�
 
 ![ai-gov-gateway 的整體架構與能力](docs/images/architecture.svg)
 
-gateway 先做兩條路徑共用的檢查（Authorization、路由、agent 版本、委託人），再分成 LLM Gateway 與 MCP Gateway 各自處理，最後送到模型供應商與下游系統；顏色標示每項能力加入的開發階段。
+請求先經過入口防護，再依路徑進入 LLM Gateway 或 MCP Gateway；兩條路徑都經過同一個治理核心（身份、policy 與額度、審批、稽核），最後才送到模型供應商與下游系統。顏色標示每項能力加入的開發階段。
 
 一次需要核准的 tool 呼叫大致是這樣：
 
