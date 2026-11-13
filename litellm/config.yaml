@@ -13,11 +13,14 @@ model_list:
       model: openai/probe-primary
       api_base: http://probe_llm:8300/v1
       api_key: probe
+    # 測試單價：讓依使用者的預算在不花 LLM 費用的情況下也能驗證
+    model_info: {input_cost_per_token: 0.000001, output_cost_per_token: 0.00001}
   - model_name: probe-fallback
     litellm_params:
       model: openai/probe-fallback
       api_base: http://probe_llm:8300/v1
       api_key: probe
+    model_info: {input_cost_per_token: 0.000001, output_cost_per_token: 0.00001}
 
 router_settings:
   # 主力重試 num_retries 次後仍丟出任何例外（含 4xx，LiteLLM 無法依狀態碼過濾）就改送 fallback；
