@@ -116,3 +116,40 @@ def test_llm_guardrail_event_with_details_verifies():
     assert first_invalid([record]) is None
     tampered = record.model_copy(update={"details": {"pii": {"EMAIL": 2}}})
     assert first_invalid([tampered]) == 1
+
+
+@pytest.mark.parametrize(
+    ("event_type", "decision", "details"),
+    [
+        (
+            "llm_access",
+            "deny",
+            {"call_id": "c1", "tier": "default", "limit": {"type": "budget_day"}},
+        ),
+        (
+            "llm_limit_exceeded",
+            "over_limit",
+            {
+                "call_id": "c1",
+                "over": {
+                    "budget_day": {
+                        "limit": "2.0",
+                        "before": "1.99",
+                        "after": "2.002",
+                        "over": "0.002",
+                    }
+                },
+            },
+        ),
+    ],
+)
+def test_m5_events_verify(event_type, decision, details):
+    event = AuditEvent(
+        event_type=event_type,
+        agent_id="kyt-agent",
+        user_sub="alice-sub",
+        decision=decision,
+        details=details,
+    )
+    record = build_record(record_id=1, prev_hash=GENESIS_HASH, ts=START, event=event)
+    assert first_invalid([record]) is None

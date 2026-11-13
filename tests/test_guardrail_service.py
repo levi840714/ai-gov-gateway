@@ -355,3 +355,14 @@ async def test_identifiers_are_pseudonymized_consistently():
     call_id = guarded.messages[1]["tool_calls"][0]["id"]
     assert call_id == guarded.messages[2]["tool_call_id"] == "<EMAIL_2>"
     assert 'name="get_counterparties"' in guarded.messages[2]["content"]
+
+
+def test_error_body_includes_limit():
+    error = GuardrailError(
+        403, "user_budget_exceeded", limit={"type": "budget_day", "resets_at": "x"}
+    )
+    assert error.body() == {
+        "governance": "denied",
+        "reasons": ["user_budget_exceeded"],
+        "limit": {"type": "budget_day", "resets_at": "x"},
+    }

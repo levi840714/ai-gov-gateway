@@ -114,6 +114,8 @@ AuditEventType = Literal[
     "approval_rejected",
     "approval_expired",
     "llm_guardrail",
+    "llm_access",
+    "llm_limit_exceeded",
 ]
 
 
