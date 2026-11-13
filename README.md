@@ -7,7 +7,7 @@ AI Governance Gateway 是 AI agent 存取 LLM 與工具的統一治理入口。�
 兩條流量各自經過這些檢查：
 
 - **tool 呼叫**：檢查是哪個 agent、代表哪位使用者、這個動作能不能做、要不要 Supervisor 核准
-- **LLM 請求**：檢查 tool 結果裡有沒有夾帶指令，送出前把個資換成代號，回應時再換回原值
+- **LLM 請求**：檢查代表哪位使用者、這位使用者的額度還夠不夠；檢查 tool 結果裡有沒有夾帶指令，送出前把個資換成代號，回應時再換回原值
 
 所有決策都寫進同一條防竄改的稽核紀錄。
 
@@ -43,6 +43,7 @@ agent 執行有副作用的動作（例如凍結帳戶、送出申報）之前�
 | 預設拒絕 | token 無效、policy 沒回應、資料庫或稽核寫入失敗、guardrail 無法判斷時，一律拒絕 |
 | 資料最小化 | 送給模型供應商前，身分證、電話、帳號、API key 等換成代號；對照表只存在 gateway 的記憶體 |
 | 外部資料不是指令 | tool 結果包上資料邊界，命中注入規則時依 agent 設定移除、拒絕或標記 |
+| 依使用者的額度 | 每位使用者在每個 agent 有自己的日、月預算與流量上限；用完後只擋他自己，超出的量逐筆記錄 |
 
 ## 功能
 
@@ -64,9 +65,16 @@ LLM guardrail：
 - **注入防護**：以規則比對 tool 結果中的 prompt injection，並以 spotlighting 標出外部資料的邊界；處理方式依 agent 的 OPA 設定
 - **PII 假名化**：送給模型前把個資換成代號，回應時換回原值，streaming 也能還原；對照表不持久化
 
+依使用者的 LLM 額度：
+
+- **使用者身份**：LLM 請求也要帶委託人的 token，client 自帶的 end user 身份（`user` 欄位、`x-litellm-end-user-id` 等）一律拒絕
+- **依使用者的額度**：每位使用者在每個 agent 有日、月預算與 rpm、tpm、同時進行數上限，等級依角色由 OPA 提供；用完後只擋他自己
+- **單次上限**：輸入字元數與輸出 token 有上限，沒帶 `max_tokens` 時補上，把跨過上限時的超額限制在已知範圍
+- **超額紀錄與對帳**：回應後以 LiteLLM 的實際成本結算，逐筆記錄超出日、月預算與 tpm 的量並寫入稽核；遺失的結算由對帳指令補回
+
 流量管理（由 LiteLLM 提供，gateway 設定）：
 
-- 模型別名、依 key 計費、rpm 與 tpm 限流、預算上限
+- 模型別名、依 key 計費、rpm 與 tpm 限流、每月重置的 key 預算（agent 的總額度）
 - Gemini 出錯時改送 `gpt-6-luna`
 - MCP tool 的權限與定義鎖定
 
@@ -78,16 +86,16 @@ flowchart LR
     sup(["Supervisor<br/>agw CLI"]) -->|"Keycloak token"| gw
     subgraph gw["gateway（單一容器、單一 process、:4000）"]
         litellm["LiteLLM<br/>/v1、/mcp"]
-        llmhook["LLM guardrail<br/>pre / post-call"]
+        llmhook["LLM guardrail<br/>使用者額度、pre / post-call"]
         hook["tool 治理 hook<br/>pre_mcp_call"]
-        engine["治理引擎<br/>決策、審批、guardrail、稽核"]
+        engine["治理引擎<br/>決策、審批、guardrail、額度、稽核"]
         api["/governance API"]
         litellm -->|"/v1"| llmhook --> engine
         litellm -->|"/mcp"| hook --> engine
         api --> engine
     end
     engine -->|內部網路| opa["OPA<br/>policies/"]
-    engine --> pg[("Postgres")]
+    engine --> pg[("Postgres<br/>審批、稽核、用量帳本")]
     gw -->|"驗章、token exchange"| kc[("Keycloak")]
     gw -->|"放行後（內部網路）"| ops["下游 MCP server"]
     gw -->|"假名化後的請求"| llm(["Gemini / gpt-6-luna"])
@@ -130,6 +138,9 @@ uv run python -m scripts.demo_m2
 
 # 5. 跑一次 LLM guardrail 的示範（使用測試 provider probe_llm，不花 LLM 費用）
 uv run python -m scripts.demo_m4
+
+# 6. 跑一次依使用者 LLM 額度的示範（同樣使用 probe_llm）
+uv run python -m scripts.demo_m5
 ```
 
 `demo_m2` 跑 13 個 tool 治理情境，全部通過時最後一行是 `13/13 通過`：
@@ -169,7 +180,26 @@ uv run python -m scripts.demo_m4
 
 過程中腳本會暫時停止 OPA。情境都使用正式的 `kyt-agent@1.5` key 搭配 probe 模型；tpm 情境會讓這把 key 被限流，腳本等 60 秒的計數視窗過去、再次放行後才繼續，因此多花約 1 分鐘。
 
-Keycloak 裡的測試帳號有 `alice`（分析師）、`bob`（Supervisor）、`carol`（兩種角色都有）。這些帳號和 client secret 都是 `keycloak/realm-governance.json` 裡的測試值，只能在本機使用。
+`demo_m5` 跑 19 個依使用者額度的情境，以 `19/19 通過` 結束。額度情境使用低額度的測試帳號 `erin`（`quota_probe` 等級，日額度 $0.002）：
+
+| # | 情境 | 預期結果 |
+| - | ---- | -------- |
+| 1–3 | 缺使用者 token、無效 token、服務帳號的 token | `401 missing_user_token` / `invalid_user_token` |
+| 4–5 | body 自帶 `user`、帶 `x-litellm-customer-id` header | `400 end_user_override` |
+| 6 | 以上請求 | 都沒有送到 provider |
+| 7–8 | `max_tokens` 超過等級上限、`n` 為 2 | `400 max_tokens_exceeded` / `unsupported_field` |
+| 9 | 沒帶 `max_tokens` | provider 收到等級的上限（64） |
+| 10–11 | streaming、主力失敗改走 fallback | 各結算一次，帳本的成本與 `LiteLLM_SpendLogs` 相同 |
+| 12 | 跨過日額度的那一筆 | 放行，超額記在帳本與 `llm_limit_exceeded` 稽核 |
+| 13–14 | 之後的請求；另一位使用者 | erin 回 `403 user_budget_exceeded`（`resets_at` 為台北隔日 00:00）；alice 仍是 200 |
+| 15 | 並行 3 筆跨過上限 | 各筆超額的加總等於總成本減日額度 |
+| 16–17 | 同時進行數、rpm 達到上限 | `429 user_rate_limited`，`limit.type` 為 `concurrency` / `rpm` |
+| 18 | 結算事件遺失 | 對帳依 `LiteLLM_SpendLogs` 補結算 |
+| 19 | 驗證稽核 | hash chain 完整 |
+
+腳本只會刪除 erin 在 `llm_usage` 的列，結束前也會清掉。
+
+Keycloak 裡的測試帳號有 `alice`（分析師）、`bob`（Supervisor）、`carol`（兩種角色都有）與 `erin`（只有 `llm_quota_probe`，供 LLM 額度的測試）。這些帳號和 client secret 都是 `keycloak/realm-governance.json` 裡的測試值，只能在本機使用。Keycloak 只在 realm 不存在時匯入；重建 Keycloak 容器會重新匯入，每個帳號會拿到新的 `sub`，既有的審批、稽核與 `llm_usage` 記的是舊的 `sub`，個人額度也會從 0 開始算。
 
 ## 使用方式
 
@@ -186,7 +216,9 @@ agent 用 MCP client 連到 `http://localhost:4000/mcp`，並帶上兩個 header
 
 收到 `pending_approval` 時，agent 記下 `approval_id`，等 Supervisor 核准後，用一模一樣的參數再送一次就好，不需要額外的參數。重送前可以用委託人的 token 呼叫 `GET /governance/approvals/{id}/status` 確認是否已核准，避免在待審期間重送。可以參考 [`scripts/agent_sim.py`](scripts/agent_sim.py)；實際接入的例子是 kyt_agent v1.5。
 
-LLM 的請求用 OpenAI 相容格式送到 `http://localhost:4000/v1/chat/completions`，模型名稱用 `litellm/config.yaml` 裡定義的別名。LLM 與 tool 呼叫用同一把 agent 版本的 key（`Authorization: Bearer <key>`），例如 kyt_agent 的 `LLM_API_KEY` 與 `GATEWAY_API_KEY` 都填 `kyt-agent@1.5` 的 key。版本未註冊或 agent 未登記時回 `403 unregistered_agent_version`，與 tool 呼叫相同。受治理的 key 只能呼叫 chat completions 與 MCP，請求內容會經過 [LLM guardrail](#llm-guardrail)。
+LLM 的請求用 OpenAI 相容格式送到 `http://localhost:4000/v1/chat/completions`，模型名稱用 `litellm/config.yaml` 裡定義的別名。header 與 tool 呼叫相同：`x-litellm-api-key` 放 agent 版本的 key，`Authorization` 放委託人的 Keycloak token（M5 起必填，沒帶回 `401 missing_user_token`）。LLM 與 tool 呼叫用同一把 key，例如 kyt_agent 的 `LLM_API_KEY` 與 `GATEWAY_API_KEY` 都填 `kyt-agent@1.5` 的 key。Keycloak 的 access token 只有 300 秒，agent 要在每次請求前取得未過期的 token。版本未註冊或 agent 未登記時回 `403 unregistered_agent_version`，與 tool 呼叫相同。受治理的 key 只能呼叫 chat completions 與 MCP，請求會經過 [LLM guardrail](#llm-guardrail) 與 [依使用者的 LLM 額度](#依使用者的-llm-額度)。
+
+不要在請求中帶 `user`、`metadata.user_id`、`metadata.user`，或 `x-litellm-customer-id`、`x-litellm-end-user-id` header：這些是 client 自填的身份，gateway 一律回 `400 end_user_override`，使用者只來自驗證過的 token。
 
 ### 用 `agw` CLI 審批
 
@@ -244,24 +276,32 @@ agent 的調查工具多半在本地執行，外部資料（鏈上字串、文�
 送出前（pre-call hook）：
 
 1. 只接受 chat completions（call type 為 `acompletion`），其他呼叫回 `400 call_type_not_governed`
-2. 檢查請求欄位：guardrail 只處理訊息內容與 tool 參數，白名單以外的欄位回 `400 unsupported_field`
-3. 從 key 名稱解析出 agent 與版本（`<agent>@<版本>`），向 OPA 查詢註冊狀態與 guardrail 設定：名稱格式不符、版本未註冊或 agent 未登記時回 `403 unregistered_agent_version`（格式不符時不查 OPA），agent 已停用時回 `403 agent_suspended`
-4. 檢查大小：單則訊息超過 `GOV_GUARDRAIL_MAX_CHARS`、整個請求超過 `GOV_GUARDRAIL_MAX_TOTAL_CHARS` 時拒絕，不截斷
-5. tool 結果（`role: tool` 與舊版的 `function`）先正規化：移除零寬、雙向控制等不可見字元，再做 NFKC
-6. 以 `guardrails/injection_rules.json` 的規則比對正規化後的 tool 結果，依 agent 設定處理
-7. 所有訊息的 PII 換成代號，包括內容、歷史中的 tool call 參數、`name`、`tool_call_id` 與 tool call 的 `id`
-8. tool 結果包上邊界：
+2. 檢查請求欄位：guardrail 只處理訊息內容與 tool 參數，白名單以外的欄位回 `400 unsupported_field`；client 自帶 end user 身份時回 `400 end_user_override`
+3. 驗證使用者 token：與 tool 呼叫相同的檢查（簽章、issuer、audience、到期、發行的 client、`sub`）
+4. 從 key 名稱解析出 agent 與版本（`<agent>@<版本>`），向 OPA 一次查詢註冊狀態、guardrail 設定與這位使用者的額度等級：名稱格式不符、版本未註冊或 agent 未登記時回 `403 unregistered_agent_version`（格式不符時不查 OPA），agent 已停用時回 `403 agent_suspended`，沒有符合的等級時回 `403 no_llm_quota`
+5. 檢查單次上限：`n` 必須沒帶或是 1；`max_tokens` / `max_completion_tokens` 超過等級上限時拒絕，都沒帶時補上；訊息與 tool 參數的文字超過等級的 `max_input_chars` 時拒絕
+6. 檢查大小：單則訊息超過 `GOV_GUARDRAIL_MAX_CHARS`、整個請求超過 `GOV_GUARDRAIL_MAX_TOTAL_CHARS` 時拒絕，不截斷
+7. guardrail：
+   1. tool 結果（`role: tool` 與舊版的 `function`）先正規化：移除零寬、雙向控制等不可見字元，再做 NFKC
+   2. 以 `guardrails/injection_rules.json` 的規則比對正規化後的 tool 結果，依 agent 設定處理
+   3. 所有訊息的 PII 換成代號，包括內容、歷史中的 tool call 參數、`name`、`tool_call_id` 與 tool call 的 `id`
+   4. tool 結果包上邊界：
 
-   ```
-   <<tool_output name="get_counterparties">>
-   （tool 原本的內容）
-   <</tool_output>>
-   ```
+      ```
+      <<tool_output name="get_counterparties">>
+      （tool 原本的內容）
+      <</tool_output>>
+      ```
 
-   內容裡的邊界字串（含大小寫與空白變體）會被改寫，不能提前關閉邊界
-9. 有任何發現時寫一筆稽核
+      內容裡的邊界字串（含大小寫與空白變體）會被改寫，不能提前關閉邊界
+   5. 有任何發現時寫一筆 `llm_guardrail` 稽核
+8. 放行判斷與記錄：在帳本的交易中檢查同時進行數、rpm、tpm 與日、月預算，都未達上限才記一筆 `in_flight`（見 [依使用者的 LLM 額度](#依使用者的-llm-額度)）
+
+自帶 end user 身份、token、未註冊與停用、沒有額度等級、單次上限與額度的拒絕都寫一筆 `llm_access` 稽核；欄位白名單、OPA 錯誤、M4 的大小檢查與 `503 budget_unavailable` 不寫。token 放在 OPA 之前，未驗證的 claims 不會送進 policy；單次上限放在 guardrail 之前，被拒絕的請求不做 PII 偵測；放行放在最後，前面任何一步拒絕都不會留下帳本紀錄。
 
 回應時（post-call hook）：把內容與 tool call 參數裡本次請求發出的代號換回原值。streaming 時會暫存可能是代號開頭的片段，代號被切在兩個 chunk 之間也能還原。`API_KEY` 的代號不會還原進 tool call 參數，避免被注入的模型把金鑰帶出去。
+
+回應之後：LiteLLM 計費完成的 success 事件以實際成本結算帳本中的這一筆（streaming 在串流結束後）；請求最終失敗時，failure hook 把這一筆標為 `released`。
 
 每次請求都重新處理整段歷史，agent 拿到的永遠是原值，下次送出時再換一次代號即可。對照表只存在 gateway 的記憶體，生命週期如下：
 
@@ -325,28 +365,43 @@ agent 的調查工具多半在本地執行，外部資料（鏈上字串、文�
 
 ### 錯誤代碼
 
-LiteLLM 會把錯誤包成 OpenAI 格式：HTTP 狀態碼不變，`error.provider_specific_fields` 是 `{"governance": "denied", "reasons": ["<代碼>"]}`（注入時另有 `rules`，欄位錯誤時另有 `field`），`error.message` 是同一份內容的 JSON 字串。回應只帶代碼，不含原文。
+LiteLLM 會把錯誤包成 OpenAI 格式：HTTP 狀態碼不變，`error.provider_specific_fields` 是 `{"governance": "denied", "reasons": ["<代碼>"]}`（注入時另有 `rules`，欄位錯誤時另有 `field`，額度的拒絕另有 `limit`），`error.message` 是同一份內容的 JSON 字串。回應只帶代碼，不含原文與金額：
+
+```json
+{"governance": "denied", "reasons": ["user_budget_exceeded"], "limit": {"type": "budget_day", "resets_at": "2026-11-15T00:00:00+08:00"}}
+{"governance": "denied", "reasons": ["user_rate_limited"], "limit": {"type": "rpm", "retry_after_seconds": 12}}
+```
 
 | 狀態碼 | 代碼 | 發生情況 |
 | ------ | ---- | -------- |
 | 400 | `prompt_injection_detected` | tool 結果命中注入規則，且 agent 設定為 `deny` |
-| 400 | `content_too_large` | 單則訊息或整個請求超過掃描上限（NFKC 展開後也會再檢查） |
-| 400 | `unsupported_field` | 請求帶了 guardrail 不處理的欄位，`field` 為欄位名稱 |
+| 401 | `missing_user_token` | 沒有 `Authorization` |
+| 401 | `invalid_user_token` | token 無法驗證，或不是允許的 client 發的（例如服務帳號） |
+| 400 | `end_user_override` | body 的 `user`、`metadata.user_id`、`metadata.user`，或 `x-litellm-customer-id`、`x-litellm-end-user-id` header；`field` 為欄位或 header 名稱 |
+| 400 | `max_tokens_exceeded` | `max_tokens` 或 `max_completion_tokens` 超過等級的上限，或不是正整數 |
+| 400 | `content_too_large` | 文字總長超過等級的 `max_input_chars`；單則訊息或整個請求超過掃描上限（NFKC 展開後也會再檢查） |
+| 400 | `unsupported_field` | 請求帶了 guardrail 不處理的欄位，或 `n` 不是 1；`field` 為欄位名稱 |
 | 400 | `invalid_messages` | `messages` 不是物件陣列 |
 | 400 | `too_many_pii_values` | 單次請求的不同 PII 值超過 1,000 個，或合計超過 65,536 字元 |
 | 400 | `pii_value_too_long` | 單一 PII 值超過 2,048 字元 |
 | 400 | `call_type_not_governed` | 非 chat completions 的呼叫進入 hook（例如 master key 呼叫 embeddings） |
 | 403 | `unregistered_agent_version` | key 名稱不是 `<agent>@<版本>`，或版本未註冊、agent 未登記 |
 | 403 | `agent_suspended` | agent 已停用 |
+| 403 | `no_llm_quota` | 沒有符合使用者角色的額度等級 |
+| 403 | `user_budget_exceeded` | 本日或本月已結算的成本達到上限；`limit.resets_at` 為恢復時間，不必重試 |
+| 429 | `user_rate_limited` | 同時進行數、rpm 或 tpm 達到上限；`limit.retry_after_seconds` 後可重試 |
 | 502 | `guardrail_output_error` | 回應的代號還原失敗，或對照表已被回收；不回傳半還原的結果 |
 | 503 | `policy_unavailable` | OPA 沒有回應或逾時 |
 | 503 | `policy_error` | OPA 回傳的設定不完整或名稱不支援 |
 | 503 | `guardrail_unavailable` | 規則比對或 PII 偵測發生例外，或同一把 key 重複使用暫存中的 `call_id` |
-| 503 | `audit_write_failed` | 有發現但稽核寫入失敗 |
+| 503 | `budget_unavailable` | 帳本無法讀寫、同一把 key 重複使用進行中的 `call_id`，或模型與它的 fallback 沒有單價 |
+| 503 | `audit_write_failed` | 有發現但稽核寫入失敗，或拒絕的稽核寫入失敗 |
 
 ### 稽核事件
 
-只有偵測到 PII、注入或不可見字元時，才寫一筆 `event_type = llm_guardrail` 的紀錄，接在同一條 hash chain 上：
+LLM 請求有三種稽核事件，都接在同一條 hash chain 上。放行與正常結算不寫稽核，計量紀錄在帳本。
+
+只有偵測到 PII、注入或不可見字元時，才寫一筆 `event_type = llm_guardrail` 的紀錄：
 
 | 欄位 | 內容 |
 | ---- | ---- |
@@ -361,15 +416,114 @@ LiteLLM 會把錯誤包成 OpenAI 格式：HTTP 狀態碼不變，`error.provide
 
 不記錄 PII 原值與 tool 原文。
 
-### fallback 與 tpm
+上述處理順序中自帶 end user 身份、token、未註冊與停用、沒有額度等級、單次上限與額度的拒絕，寫一筆 `llm_access`：
+
+| 欄位 | 內容 |
+| ---- | ---- |
+| `agent_id`、`agent_version`、`key_alias` | 呼叫的 agent 與 key（名稱格式不符時 agent 為 `null`） |
+| `user_sub`、`username` | 驗證過的使用者；token 驗證之前就被拒絕時為 `null` |
+| `decision`、`reasons` | `deny` 與錯誤代碼 |
+| `policy_version` | 有查到 OPA 時填入 |
+| `details` | `call_id`、`model`、`tier`；額度的拒絕另有 `limit`（種類、恢復時間與設定的上限 `max`）與判斷時的用量，例如 `{"requests": 20}`、`{"settled_usd": "2.004", "limit_usd": "2.0"}` |
+
+結算時任一項超額大於 0，與帳本同一個交易寫一筆 `llm_limit_exceeded`：
+
+| 欄位 | 內容 |
+| ---- | ---- |
+| `agent_id`、`key_alias`、`user_sub` | 放行時的 agent、key 與使用者 |
+| `decision`、`reasons` | `over_limit` 與超出的項目，例如 `["budget_day"]` |
+| `details.call_id`、`model`、`tier` | 對照帳本與 `LiteLLM_SpendLogs` |
+| `details.cost_usd`、`tokens` | 這一筆的實際成本與輸入、輸出 token |
+| `details.over` | 每一項的 `limit`、`before`、`after`、`over`（金額以字串記錄） |
+| `details.crossed` | 每一項是否就是跨過上限的那一筆，例如 `{"budget_day": true}` |
+| `details.settled_by` | `callback` 或 `reconcile` |
+
+### fallback
 
 - `kyt-main`（Gemini）重試一次仍失敗時，改送 `kyt-main-fallback`（`openai/gpt-6-luna`）。fallback 收到的是假名化後的內容
 - LiteLLM 不能依狀態碼限制 fallback：主力回 400、401、403、404 也會改送 fallback。Gemini 的 key 設錯時 client 仍拿到正常回應，問題只會出現在 gateway 日誌
 - `.env` 沒有 `OPENAI_API_KEY` 時 fallback 會失敗，client 收到主力原本的錯誤
 - fallback 不檢查 key 的 `models` 與預算，`kyt-agent@1.5` 的 key 沒有列 `kyt-main-fallback` 也能用到 `gpt-6-luna`
 - 一次呼叫最多送出主力 2 次、fallback 2 次；kyt 本身也會重試，故障時呼叫量會疊加
-- `kyt-agent@1.4`、`kyt-agent@1.5` 的 key 設 `tpm_limit: 300000`、`rpm_limit: 60`。用量在回應後才累計：超過上限的那個請求仍會放行，之後的請求回 429
+- fallback 成功時，個人額度的帳本以同一個 `call_id` 結算一次，成本以實際回應的模型計算；放行前會檢查別名與它的 fallback 都有單價
 - 真實模型的驗證：讓主力一律回 503 跑 kyt eval 3 筆，每次呼叫都由 `gpt-6-luna` 回應，等級與 Gemini 相同（三筆皆 HIGH），估算成本 $0.0090。只有 3 筆，不代表整批資料的召回率與誤報率，見 [findings 的「真實 LLM 驗證」](docs/spikes/m4-findings.md)
+
+## 依使用者的 LLM 額度
+
+virtual key 的預算與限流是整個 agent 共用的：任何一位使用者（或替他工作、被注入的 agent）都能把整把 key 的額度用光，其他人跟著被擋。gateway 因此依（agent, 使用者）另外記帳：使用者來自驗證過的 token，額度等級來自 OPA，用量記在 `governance` 資料庫的 `llm_usage`。
+
+不用 LiteLLM 內建的 end user 預算：它在 guardrail 之前、以 client 自填的 `user` 等欄位決定是誰，被注入的 agent 可以每次換一個值；拒絕與超額也不會寫進我們的稽核。設計與比較見 [M5 spec](docs/specs/2026-11-13-user-budget-design.md) §5。
+
+### 額度等級
+
+等級放在 `policies/agents/data.json` 各 agent 的 `llm_limits`，依序比對，第一個符合使用者角色的生效（`"*"` 表示任何驗證過的使用者）：
+
+| 等級 | 角色 | 日 / 月預算 | rpm | tpm | 同時進行 | 輸入字元上限 | 輸出 token 上限 |
+| ---- | ---- | ----------- | --- | --- | -------- | ------------ | --------------- |
+| `quota_probe` | `llm_quota_probe` | $0.002 / $0.01 | 5 | 5,000 | 3 | 20,000 | 64 |
+| `supervisor` | `compliance_supervisor` | $5 / $50 | 30 | 150,000 | 4 | 100,000 | 4,096 |
+| `default` | `*` | $2 / $20 | 20 | 150,000 | 4 | 100,000 | 4,096 |
+
+- `quota_probe` 只給整合測試與 `demo_m5` 的測試帳號 `erin`，幾筆 probe 請求就能跨過預算
+- 已註冊但沒有 `llm_limits` 的 agent 套用最嚴格的預設：日 $0.5、月 $5、rpm 10、tpm 50,000、同時進行 1、輸入 50,000 字元、輸出 2,048 token
+- 有 `llm_limits` 但沒有符合的等級時回 `403 no_llm_quota`；欄位不完整時 OPA 不回傳設定，gateway 回 `503 policy_error`
+- 輸出與輸入的上限依 kyt 的實測設定：輸出最大 1,806 token、輸入最大 10,919 token
+
+### 檢查方式
+
+| 限制 | 判斷方式 |
+| ---- | -------- |
+| 日、月預算 | 本日、本月**已結算**的成本達到上限後，之後的請求回 `403 user_budget_exceeded`。依 `GOV_BUDGET_TIMEZONE`（預設 `Asia/Taipei`）的日曆在 00:00 重置；跨過午夜的請求算在放行的那一天 |
+| 同時進行數 | 狀態為 `in_flight`、放行未超過 `GOV_USAGE_INFLIGHT_TTL_SECONDS`（300 秒）的請求數 |
+| rpm | 過去 60 秒放行的請求數（不論結果）；被拒絕的請求不計 |
+| tpm | 過去 60 秒**結算**的實際 token（輸入 + 輸出） |
+| 輸出上限 | `max_tokens` / `max_completion_tokens` 超過就 400；都沒帶時補上等級的上限（fallback 也沿用） |
+| 輸入上限 | 訊息與 tool 參數的文字總長超過 `max_input_chars` 就 400 |
+| `n` | 必須沒帶或是 1：多個回應會讓單筆成本變成數倍 |
+
+檢查在一個 Postgres 交易中、以（agent, 使用者）的 advisory lock 序列化，不同使用者互不等待。
+
+### 結算與超額
+
+判斷時只看已結算的用量，不在呼叫前估計成本，所以不會「還有額度卻被擋」；代價是跨過上限時還在進行中的請求都會放行。超出的量逐筆計算：
+
+- 回應後 LiteLLM 的 success 事件（streaming 在串流結束後）以實際成本與 token 結算這一筆，`settled_by = callback`
+- 結算與放行用同一把鎖，依序計算：`before` 是同一期其他已結算請求的總和，這一筆的超額為 `max(0, before + cost − max(before, limit))`，日、月預算與 tpm 各算一次，記在 `over_day_usd`、`over_month_usd`、`over_tpm_tokens`
+- 依序計算讓各筆的超額加總正好等於總超額。例如 `demo_m5` 情境 15：日額度 $0.002，已結算 $0.0018，三筆並行各 $0.0003，三筆的超額依結算順序為 $0.0001、$0.0003、$0.0003，合計 $0.0007 = $0.0027 − $0.002
+- 任一項超額大於 0 時，在同一個交易寫入 `llm_limit_exceeded` 稽核；`crossed` 標出跨過上限的那一筆
+- 請求最終失敗（含被 LiteLLM 的 key 限流擋下）時，failure hook 把 `in_flight` 改為 `released`，不計成本
+
+超額有上界：同一期最多超出「同時進行數 × 單筆最大成本」。kyt 的設定下單筆最大約 $0.092（輸入 10 萬字元約 10.2 萬 token、輸出 4,096 token），上界約 $0.37，是日額度 $2 的 18%；正常一次一筆時只會超出最後一筆。kyt 的內容約 1 個字元 1 個 token（實測最多 1.02 倍），其他 agent 的比例不同時要重新估算（spec §8.6）。
+
+### 兩層額度
+
+| 層 | 誰強制 | 設定 | 用途 |
+| -- | ------ | ---- | ---- |
+| （agent, 使用者） | gateway 的帳本 | OPA 的 `llm_limits` | 一位使用者不能用光 agent 的額度；超額逐筆記錄 |
+| agent 版本（key） | LiteLLM | `scripts/make_keys.py` 的 `KYT_LLM`：`max_budget: 30.0`、`budget_duration: "1mo"`、`rpm_limit: 60`、`tpm_limit: 300000` | agent 的總額度，防止「使用者數 × 個人額度」超過預算 |
+
+- 兩層都是事後累計：超過上限的那個請求仍會放行，之後的請求才被擋
+- key 的 `"1mo"` 在每月 1 日 00:00 UTC（台北 08:00）重置，個人月額度在台北時間 1 日 00:00 重置，兩者差 8 小時
+- 個人 tpm（150,000）低於 key 的 tpm（300,000），一位使用者打不滿整把 key
+
+### 對帳
+
+結算事件可能遺失（gateway 在回應後、結算前重啟，或結算交易失敗）。對帳指令在 gateway 容器內執行，以 `(key 的雜湊, call_id)` 對照 `LiteLLM_SpendLogs`：
+
+```bash
+docker compose exec -T gateway python -m ai_gov_gateway.reconcile --older-than 10m
+```
+
+| 帳本中逾時的 `in_flight` | 處理 | 輸出的計數 |
+| ------------------------ | ---- | ---------- |
+| SpendLogs 有 `success` | 以它的 `spend` 與 token 結算，走同一套超額計算，`settled_by = reconcile` | `settled` |
+| 只有 `failure` | 標為 `released` | `released` |
+| 沒有任何紀錄，放行超過 `--release-missing-after`（預設 `1h`） | 標為 `released`（rate limit fallback 的第二個 `call_id` 永遠沒有紀錄） | `released_missing` |
+| 沒有任何紀錄，未超過 1 小時；或結算失敗 | 保留，等下一次 | `unresolved`（之後逐行列出 `call_id`） |
+
+- 輸出的第一行是 `settled=N released=N released_missing=N unresolved=N`；資料庫連不上時結束碼為 1
+- 建議每 10 分鐘執行一次，例如 cron 的 `*/10 * * * * cd <repo> && docker compose exec -T gateway python -m ai_gov_gateway.reconcile --older-than 10m`
+- 對帳是補救，不是主要路徑：`settled` 與 `released_missing` 持續大於 0 時，代表 callback 遺失或 key 經常被限流，值得查原因
 
 ## 撰寫 policy
 
@@ -378,9 +532,9 @@ LiteLLM 會把錯誤包成 OpenAI 格式：HTTP 狀態碼不變，`error.provide
 ```
 policies/
 ├── governance.rego          # 規則：先依序檢查拒絕條件，再收集送審原因
-├── governance_llm.rego      # LLM guardrail 的設定（governance.llm），版本註冊與停用沿用 governance.rego 的判斷
+├── governance_llm.rego      # LLM guardrail 的設定與使用者的額度等級（governance.llm），版本註冊與停用沿用 governance.rego 的判斷
 ├── governance_test.rego、governance_llm_test.rego  # Rego 測試，包含資料完整性檢查
-├── agents/data.json         # agent 註冊表：負責人、狀態、能承擔的風險等級、核准的版本與 key、guardrail 設定
+├── agents/data.json         # agent 註冊表：負責人、狀態、能承擔的風險等級、核准的版本與 key、guardrail 設定、LLM 額度等級
 ├── tools/data.json          # 各 tool 的風險等級與門檻
 ├── sanctions/data.json      # 制裁地址清單
 └── meta/data.json           # policy_version，會記進稽核紀錄
@@ -397,6 +551,7 @@ policies/
 常見的操作：
 
 - 上線新的 agent 版本：在 `agents/data.json` 的 `versions` 加上 `key_alias`，再建立同名的 virtual key，LLM 與 tool 呼叫共用這一把（`scripts/make_keys.py` 會建立缺少的 key、以 `/key/update` 同步既有 key 的權限，並刪除不在清單裡的 key）。目前註冊的是 `kyt-agent@1.4` 與 `kyt-agent@1.5`，兩把 key 都能呼叫 `kyt-main` 與測試用的 probe 模型；`kyt-agent@1.5` 的 key 只開放 `account_ops` 的 `add_to_watchlist` 與 `file_str`
+- 調整 LLM 額度：修改 `agents/data.json` 的 `llm_limits`。等級依序比對，新等級要放在 `"*"` 之前；進行中的請求以放行時的額度結算
 - 修改規則：記得更新 `meta/data.json` 的 `policy_version`，送 PR 前先跑下面三個指令
 - 修改注入規則（`guardrails/injection_rules.json`，不在 `policies/` 裡）：更新檔案中的 `rules_version`，並跑 `uv run pytest tests/test_guardrail_injection.py`，其中包含以 kyt 實際工具輸出做的誤判測試。規則檔在 gateway 啟動時載入，改完要重建映像
 
@@ -414,11 +569,11 @@ docker run --rm -v "$PWD/policies:/policies:ro" openpolicyagent/opa:1.21.1 check
 | ---- | ---- | ---- |
 | `gateway` | `:4000` | LiteLLM v1.105.1 加上治理套件 |
 | `keycloak` | `:8080` | IdP，啟動時匯入 `keycloak/realm-governance.json` |
-| `postgres` | `127.0.0.1:55433` | `litellm` 資料庫存 key 與用量，`governance` 資料庫存審批與稽核 |
+| `postgres` | `127.0.0.1:55433` | `litellm` 資料庫存 key 與用量，`governance` 資料庫存審批、稽核與依使用者的用量帳本 |
 | `opa` | 內部網路 | OPA 1.21.1，不對外開放 |
 | `account_ops` | 內部網路 | 示範用的下游 MCP server，提供 `add_to_watchlist`、`freeze_account`、`file_str` |
 | `probe_mcp` | `127.0.0.1:8100` | 除錯用的上游 MCP server，會回傳收到的 header 與 token claims |
-| `probe_llm` | `127.0.0.1:8300` | OpenAI 相容的測試 provider：記錄收到的請求，依 system 訊息中的 `probe:` 指令回傳文字、tool call、503 或指定的 token 用量，供 `demo_m4` 與整合測試使用 |
+| `probe_llm` | `127.0.0.1:8300` | OpenAI 相容的測試 provider：記錄收到的請求與 header 名稱，依 system 訊息中的 `probe:` 指令回傳文字、tool call、503、指定的 token 用量或放慢 streaming，供 `demo_m4`、`demo_m5` 與整合測試使用 |
 
 `opa` 和 `account_ops` 只接在 `internal: true` 的 `governed` 網路上，只有 gateway 連得到。
 
@@ -441,6 +596,8 @@ gateway 從容器的環境變數讀取這些設定，值寫在 `docker-compose.y
 | `GOV_GUARDRAIL_RULES_PATH` | `/opt/ai-gov-gateway/guardrails/injection_rules.json` | 注入規則檔（映像內的路徑） |
 | `GOV_GUARDRAIL_MAX_CHARS` | `200000` | 單則訊息的掃描上限（字元），超過時回 `content_too_large` |
 | `GOV_GUARDRAIL_MAX_TOTAL_CHARS` | `1000000` | 整個請求的掃描上限（字元） |
+| `GOV_BUDGET_TIMEZONE` | `Asia/Taipei` | 個人日、月預算的日曆時區；時區名稱不存在時設定載入失敗，治理請求一律被拒絕 |
+| `GOV_USAGE_INFLIGHT_TTL_SECONDS` | `300` | 放行超過此秒數仍未結算的請求不再計入同時進行數，留給對帳 |
 
 </details>
 
@@ -453,16 +610,28 @@ gateway 會留下以下紀錄，都在 compose 的 Postgres（`127.0.0.1:55433`�
 | 每次 LLM 呼叫的成本與延遲 | `litellm` | `LiteLLM_SpendLogs` | 成本、token、模型、key、狀態、`startTime` / `endTime` / `completionStartTime`（首個 token）、`request_duration_ms` |
 | 每天的成本、失敗率與延遲 | `litellm` | `LiteLLM_DailyModelUsage`、`LiteLLM_DailyTagSpend` | 依模型、key 彙總的成本、token、成功與失敗次數；`DailyTagSpend` 另有 cache 節省的金額與 `total_response_time_ms` |
 | 各路由的請求結果 | `litellm` | `LiteLLM_DailyGatewayRequests` | 每天每條路由的成功與失敗次數 |
-| 預算與限流 | `litellm` | `LiteLLM_VerificationToken` | 每把 key 的 `max_budget`、`budget_duration`、`rpm_limit`、`tpm_limit` 與目前的 `spend`；由 `scripts/make_keys.py` 設定。超過 rpm 或 tpm 時回 429，花費達到 `max_budget` 時拒絕，兩者都在呼叫模型前檢查 |
+| agent 的預算與限流 | `litellm` | `LiteLLM_VerificationToken` | 每把 key 的 `max_budget`、`budget_duration`（`"1mo"`，每月 1 日 00:00 UTC 重置）、`rpm_limit`、`tpm_limit` 與目前的 `spend`；由 `scripts/make_keys.py` 設定。超過 rpm 或 tpm 時回 429，花費達到 `max_budget` 時拒絕，兩者都在呼叫模型前以已累計的用量檢查 |
+| 依使用者的用量與超額 | `governance` | `llm_usage` | 每次放行的 LLM 請求一列：agent、key、使用者的 `sub`、模型、等級與放行時的額度快照、狀態（`in_flight` / `settled` / `released`）、成本、token、這一筆超出日、月預算與 tpm 的量 |
 | key 的權限與生命週期 | `litellm` | `LiteLLM_VerificationToken`、`LiteLLM_DeletedVerificationToken` | 可用模型、`allowed_routes`、`metadata`、到期與輪換設定；刪除的 key 保留刪除時間與刪除者 |
 | 實際被呼叫過的 MCP tool | `litellm` | `LiteLLM_ToolTable`、`LiteLLM_SpendLogToolIndex` | tool 名稱、來源 server、呼叫次數、最後使用時間；請求與 tool 的對應 |
-| 治理決策、審批與 guardrail 的發現 | `governance` | `audit_events`、`approvals` | tool 決策、審批的狀態變化、`llm_guardrail` 事件；以 hash chain 串接 |
+| 治理決策、審批與 guardrail 的發現 | `governance` | `audit_events`、`approvals` | tool 決策、審批的狀態變化、`llm_guardrail`、`llm_access`、`llm_limit_exceeded` 事件；以 hash chain 串接 |
 
 - LiteLLM 的表名有大小寫，SQL 裡要加雙引號，例如 `SELECT * FROM "LiteLLM_SpendLogs"`
 - `LiteLLM_SpendLogs` 的 `messages` 與 `response` 是空的：沒有開啟 `store_prompts_in_spend_logs`，對話內容不落地
 - `llm_guardrail` 事件的 `details.call_id` 與 `LiteLLM_SpendLogs.litellm_call_id` 是同一個值，可以把治理紀錄與用量對起來
 - `request_duration_ms` 是整段時間，包含 guardrail、OPA 查詢與模型；目前沒有分段的 trace、dashboard 或告警
-- `probe-primary`、`probe-fallback` 是測試 provider，沒有定價，統計成本時可以用 `model_group` 篩掉
+- `probe-primary`、`probe-fallback` 是測試 provider，有測試單價（輸入 $1、輸出 $10 每百萬 token），讓個人預算不花 LLM 費用也能驗證；統計真實成本時以 `model_group` 篩掉
+- `llm_usage.call_id` 與 `LiteLLM_SpendLogs.litellm_call_id` 相同，`owner` 是 `sha256(SpendLogs.api_key)`；兩者在不同資料庫，要分別查詢再以這兩個值對照。`LiteLLM_SpendLogs.end_user` 永遠是空的：client 自帶的 end user 身份一律被拒絕
+- `over_*` 欄位是這一筆超出的量，0 表示沒有超出；同一期各筆相加就是總超額。例如某位使用者本日（台北時間）的超額總和：
+
+  ```sql
+  SELECT sum(over_day_usd) AS over_day_usd,
+         count(*) FILTER (WHERE over_day_usd > 0) AS over_requests,
+         sum(cost_usd) AS cost_usd
+  FROM llm_usage
+  WHERE agent_id = 'kyt-agent' AND user_sub = '<Keycloak 的 sub>' AND status = 'settled'
+    AND created_at >= date_trunc('day', now() AT TIME ZONE 'Asia/Taipei') AT TIME ZONE 'Asia/Taipei';
+  ```
 
 ## 專案結構
 
@@ -470,8 +639,9 @@ gateway 會留下以下紀錄，都在 compose 的 Postgres（`127.0.0.1:55433`�
 ai-gov-gateway/
 ├── src/ai_gov_gateway/
 │   ├── plugin.py            # LiteLLM 載入的進入點，負責掛上 /governance 路由與治理 hook
-│   ├── hook_adapter.py      # 把 LiteLLM hook 的資料轉成治理引擎的輸入
-│   ├── engine/              # 治理引擎（不依賴 LiteLLM）：決策、審批、稽核、token 驗證，以及 OPA 與 Postgres 的介接
+│   ├── hook_adapter.py      # 把 LiteLLM hook 的資料轉成治理引擎的輸入，以及結算用的用量
+│   ├── reconcile.py         # 對帳指令：依 LiteLLM_SpendLogs 補結算或釋放
+│   ├── engine/              # 治理引擎（不依賴 LiteLLM）：決策、審批、稽核、token 驗證、LLM 額度與帳本，以及 OPA 與 Postgres 的介接
 │   │   └── guardrails/      # LLM guardrail：注入規則與 spotlighting、PII 偵測與假名化、請求欄位白名單
 │   ├── api/approvals.py     # /governance 路由
 │   └── cli.py、cli_auth.py  # agw CLI
@@ -481,7 +651,7 @@ ai-gov-gateway/
 ├── keycloak/                # 本機測試用的 realm
 ├── account_ops/、probe_mcp/  # 示範與除錯用的 MCP server
 ├── probe_llm/               # 測試用的 OpenAI 相容 provider
-├── scripts/                 # 示範、建立 key 與驗證用的腳本
+├── scripts/                 # 示範、建立 key 與驗證用的腳本；budget_sim.py 是 demo_m5 與額度契約測試共用的帳本與 SpendLogs 查詢
 ├── tests/                   # 單元測試與整合測試
 └── docs/                    # 設計、實作計畫、技術驗證紀錄與架構圖（images/architecture.svg）
 ```
@@ -499,16 +669,18 @@ uv run mypy src
 
 | 測試 | 數量 | 涵蓋範圍 |
 | ---- | ---- | -------- |
-| 單元測試 | 412 | 引擎、審批、token 驗證、稽核、API、CLI、hook 轉接；LLM guardrail 的注入規則（含 kyt 工具輸出的誤判語料與 20 萬字元的計時測試）、PII 偵測與假名化、請求欄位、還原與 streaming |
-| 整合測試 | 32 | Postgres store 12（含並行寫入與數值精確度）、gateway 與 LiteLLM 的介面契約 7（含狀態查詢 API）、LLM guardrail 的 hook 契約 13（改寫與還原、未註冊的版本與 agent、streaming、路由限制、fallback、tpm） |
-| Rego 測試 | 45 | 每條規則、欄位缺漏或資料錯誤時的預設拒絕、資料完整性、LLM guardrail 的版本註冊、預設與設定驗證 |
-| 端到端示範 | 13 + 13 個情境 | `scripts/demo_m2.py`、`scripts/demo_m4.py` |
+| 單元測試 | 593 | 引擎、審批、token 驗證、稽核、API、CLI、hook 轉接；LLM guardrail 的注入規則（含 kyt 工具輸出的誤判語料與 20 萬字元的計時測試）、PII 偵測與假名化、請求欄位、還原與 streaming；額度的期別、放行判斷與超額計算、單價檢查、`LlmGate` 的順序與稽核、對帳 |
+| 整合測試 | 69 | Postgres store 12（含並行寫入與數值精確度）、用量帳本 22（放行、結算、釋放、並行結算的超額加總、超額與稽核同一交易、跨午夜與跨月）、gateway 與 LiteLLM 的介面契約 7（含狀態查詢 API）、LLM guardrail 的 hook 契約 13（改寫與還原、未註冊的版本與 agent、streaming、路由限制、fallback、tpm）、額度契約 15（token、自帶身份、單次上限、結算與 SpendLogs 一致、超額加總、rpm 與同時進行數、對帳） |
+| Rego 測試 | 56 | 每條規則、欄位缺漏或資料錯誤時的預設拒絕、資料完整性、LLM guardrail 的版本註冊、預設與設定驗證、額度等級的順序與嚴格預設 |
+| 端到端示範 | 13 + 13 + 19 個情境 | `scripts/demo_m2.py`、`scripts/demo_m4.py`、`scripts/demo_m5.py` |
+
+測試數量為 2026-11-14 在 M5 分支執行 `uv run pytest -q`、`uv run pytest -m integration -q`、`opa test` 的結果；示範的結果見 `var/m5-demo.txt`（不進版控）。
 
 整合測試會用 `.env` 裡的 `GOV_TEST_DATABASE_URL` 連到 `governance_test` 資料庫。測試會刪除資料表，所以資料庫名稱不是以 `_test` 結尾時會直接跳過。
 
-LLM guardrail 的契約測試需要 `probe_llm` 與 `scripts.make_keys` 建立的 `kyt-agent@1.5`、`kyt-agent@9.9`、`unknown-agent@1.0` key。tpm 測試會讓 `kyt-agent@1.5` 被限流，測試前後都等到再次放行，整合測試因此多花約 1 分鐘。
+LLM guardrail 與額度的契約測試需要 `probe_llm`、Keycloak 的測試帳號（含 `erin`），以及 `scripts.make_keys` 建立的 `kyt-agent@1.5`、`kyt-agent@9.9`、`unknown-agent@1.0` key。tpm 測試會讓 `kyt-agent@1.5` 被限流，測試前後都等到再次放行，整合測試全部約 2 分半。
 
-升級 LiteLLM 前一定要先跑整合測試與 `demo_m4`。治理 hook 依賴 LiteLLM 的 guardrail 介面、欄位名稱與 hook 的呼叫順序，這些一有變動，介面契約測試就會失敗。
+升級 LiteLLM 前一定要先跑整合測試、`demo_m4` 與 `demo_m5`。治理 hook 依賴 LiteLLM 的 guardrail 介面、欄位名稱與 hook 的呼叫順序，這些一有變動，介面契約測試就會失敗。
 
 ## 已知限制
 
@@ -532,9 +704,8 @@ LLM guardrail：
 - tool 結果在送進 LLM 時才檢查，agent 本地已經讀到原文；LLM 不經 gateway 的 agent 不受保護
 - 只有 tool 結果會正規化。其他訊息被零寬字元拆開的 email 不會被遮蔽
 - 只偵測固定格式的 PII，人名、地址不會被假名化；圖片等非文字內容不掃描
-- `user` 欄位，以及 `tools` 的描述、`response_format` 的 schema、`stop`、tool 名稱不遮蔽，這些視為開發者定義的內容；`image_url` 只接受 `url` 與 `detail`，URL 本身不遮蔽
-- LLM 請求因版本未註冊或 agent 已停用被拒絕時不寫稽核（tool 呼叫的拒絕會寫），只留下 LiteLLM 的錯誤日誌
-- 整合測試、`demo_m4` 與 `scripts/rate_limit_check.py` 使用正式的 `kyt-agent@1.5` key 搭配 probe 模型，rpm 與 tpm 也與真實的 kyt 調查共用；限流情境會讓這把 key 約 1 分鐘內回 429，不要和真實調查同時執行
+- `tools` 的描述、`response_format` 的 schema、`stop`、tool 名稱不遮蔽，這些視為開發者定義的內容；`image_url` 只接受 `url` 與 `detail`，URL 本身不遮蔽
+- 整合測試、`demo_m4`、`demo_m5` 與 `scripts/rate_limit_check.py` 使用正式的 `kyt-agent@1.5` key 搭配 probe 模型，rpm 與 tpm 也與真實的 kyt 調查共用；限流情境會讓這把 key 約 1 分鐘內回 429，不要和真實調查同時執行
 - 欄位白名單也會拒絕 `presence_penalty`、`logprobs`、`reasoning_effort`、`cache_control` 等正常參數，需要時再加入 `engine/guardrails/fields.py`
 - 受治理的 key 只能呼叫 chat completions：`/v1/models`、Azure 風格的路由、provider pass-through 都會被擋
 - 含 PII 的 tool call id 遮蔽後含有 `<` `>`，部分 provider 會以 400 拒絕
@@ -542,6 +713,19 @@ LLM guardrail：
 - 稽核的 `content_sha256` 對低熵的內容（例如短字串）可以用字典查回原文
 - streaming 最後一個 chunk 只帶 usage 時，暫存中的文字可能遺失
 - tpm 或 rpm 觸發時，LiteLLM 會以新的 call id 重跑 pre-call hook，同一個請求會寫兩筆稽核
+
+依使用者的 LLM 額度：
+
+- 事後累計：跨過上限時還在進行中的請求都會放行，最後一批會超過上限。超額有上界（kyt 的設定下約 $0.37，見 [spec §8.6](docs/specs/2026-11-13-user-budget-design.md)），每一筆超出多少都記在帳本與稽核；需要「不得超過」的硬上限時要做第二階段的預留（spec §16）
+- LLM 路徑依賴 Postgres：帳本連不上時所有 LLM 流量回 `503 budget_unavailable`，與 OPA 停擺相同
+- 結算延遲超過 `GOV_USAGE_INFLIGHT_TTL_SECONDS`（300 秒）時，那一筆不再計入同時進行數，之後才結算的成本會讓實際超額大於上界
+- 被注入的 agent 可以大量觸發拒絕，每一次都寫一筆 `llm_access` 到 hash chain；拒絕不經過模型，成本只有稽核寫入
+- LiteLLM 以 key 的 rpm / tpm 擋下有 fallback 的模型（例如 `kyt-main`）時，會以新的 `call_id` 重跑 pre-call，gateway 放行的這一筆收不到任何結算或失敗事件：300 秒內佔一個同時進行數、60 秒內計入 rpm，對帳在 1 小時後標為 `released_missing`，成本為 0。只在 key 的總量被打滿時發生，第一階段不修正
+- 有單價的模型別名在每個 gateway process 第一次使用時建立後快取：以 LiteLLM 的 API 新增模型或 fallback 後要重啟 gateway，否則新的別名一律 `503 budget_unavailable`
+- 同一把 key 以 `x-litellm-call-id` 沿用進行中的 `call_id` 時，被拒絕的那個請求若沒有觸發 failure hook，原請求之後的失敗不會即時釋放，要等 300 秒或對帳；只影響這把 key 的使用者自己
+- streaming 中途斷線時，帳本只記到斷線前的用量；真實 provider 斷線後可能已產生並計費更多輸出
+- 重建 Keycloak 容器會重新匯入 realm，每個帳號拿到新的 `sub`：既有的審批、稽核與 `llm_usage` 對應的是舊的 `sub`，個人額度從 0 重新累計
+- 個人預算只依（agent, 使用者）計算，沒有跨 agent 的使用者總額度；也沒有查詢剩餘額度的 API
 
 </details>
 
@@ -553,9 +737,12 @@ LLM guardrail：
 | M2 | 治理服務：policy、agent 版本、maker-checker 審批、hash chain 稽核 | 完成 |
 | M3 | kyt_agent v1.5 經 gateway 執行列入監控名單與送出 STR，等待核准時以狀態查詢 API 確認後重送 | 完成 |
 | M4 | LLM guardrail（注入防護與 spotlighting、PII 假名化）、`gpt-6-luna` fallback、tpm 限流 | 完成 |
+| M5 | 依委託使用者的 LLM 額度：LLM 請求驗證使用者 token、日月預算與流量上限、單次上限、逐筆的超額紀錄與對帳；key 預算改為每月重置 | 完成 |
 
 ## 文件
 
+- [M5 依使用者的 LLM 額度設計](docs/specs/2026-11-13-user-budget-design.md)：為什麼不用 LiteLLM 的 end user 預算、事後累計與預留的取捨、超額的計算與上界、對帳；實作時的調整記錄在 §17
+- [M5 技術驗證結果](docs/spikes/m5-findings.md)：LiteLLM 的 raw header、結算事件、fallback 與 rate limit 的行為，以及真實 Gemini 的成本與字元／token 比
 - [M4 LLM guardrail 設計](docs/specs/2026-10-23-m4-guardrails-design.md)：guardrail 的處理順序、PII 假名化、OPA 設定、fallback 與 tpm；實作時的調整記錄在 §13
 - [M4 技術驗證結果](docs/spikes/m4-findings.md)：Presidio 的打包、LiteLLM hook 的行為（改寫、還原、streaming、fallback、tpm），以及真實 LLM 的驗證
 - M3 的設計在 kyt_agent repo 的 `docs/specs/2026-10-21-kyt-agent-v1.5-design.md`（§8 為 gateway 的改動，§11 為實作後修訂）

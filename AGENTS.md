@@ -12,6 +12,7 @@ AI Governance Gateway（`ai-gov-gateway`）：統一治理 agent 的 LLM 流量�
 | M2 | 治理服務：以 LiteLLM hook 為執行點，OPA policy、maker-checker 審批、稽核 log、高風險 tool | 完成 |
 | M3 | kyt_agent 接入：以 `kyt-agent@1.5` key 呼叫 account_ops 的 `add_to_watchlist`、`file_str`，pending 時中斷，經狀態查詢 API 確認核准後以相同參數重送 | 完成 |
 | M4 | LLM guardrail：tool 結果的注入防護與 spotlighting、PII 假名化（單次請求內可逆）、依 agent 的 OPA 設定；`gpt-6-luna` fallback 與 tpm 限流。LLM 請求與 tool 呼叫共用 `<agent>@<版本>` key，未註冊的版本與 agent 一律拒絕 | 完成 |
+| M5 | 依委託使用者的 LLM 額度：LLM 路徑驗證使用者 token、拒絕 client 自帶的 end user 身份；依（agent, 使用者）的日月預算、rpm、tpm、同時進行數與單次上限，事後累計並逐筆記錄超額；key 預算改為每月重置 | 完成 |
 
 ## 目錄結構
 
@@ -19,25 +20,27 @@ AI Governance Gateway（`ai-gov-gateway`）：統一治理 agent 的 LLM 流量�
 ai-gov-gateway/
 ├── Dockerfile               # gateway 映像：LiteLLM v1.105.1 + presidio-analyzer + src/ai_gov_gateway（以 PYTHONPATH 載入）
 ├── docker-compose.yml       # gateway、postgres、keycloak、opa、account_ops、probe_mcp、probe_llm（image 固定版本）
-├── docker-compose.fallback.yml、docker-compose.spike.yml  # 驗證時疊加：強制 fallback、M4 hook 驗證
+├── docker-compose.fallback.yml、docker-compose.spike.yml、docker-compose.spike-m5.yml  # 驗證時疊加：強制 fallback、M4 與 M5 的 hook 驗證
 ├── src/ai_gov_gateway/
 │   ├── engine/              # 治理引擎：models、fingerprint、tokens、policy、store、postgres、audit、engine、approvals
+│   │                        # M5：limits（額度等級、期別、放行判斷與超額計算）、ledger（帳本介面）、pricing（單價檢查）、llm_gate（LlmGate：LLM 路徑的處理順序、結算與釋放）
 │   │   └── guardrails/      # LLM guardrail：models、injection（規則、正規化、spotlighting）、pii（偵測、假名化、還原）、fields（請求欄位白名單）、service（LlmGuardrail）
 │   ├── api/                 # /governance 路由（審批、狀態查詢、稽核驗證）
 │   ├── plugin.py            # LiteLLM guardrail（GovernanceGuardrail、LlmGuardrailHook）；載入時掛上 /governance 路由與 Authorization header 檢查（只在 gateway 映像內 import）
-│   ├── hook_adapter.py      # LiteLLM hook 的 data → ToolCall；LLM 回應與 streaming 的還原、pre-call 到 post-call 之間的對照表
+│   ├── hook_adapter.py      # LiteLLM hook 的 data → ToolCall / LlmRequest；raw header 的 token、結算用量；LLM 回應與 streaming 的還原、pre-call 到 post-call 之間的對照表與放行紀錄（AdmittedCalls）
+│   ├── reconcile.py         # 對帳指令（在 gateway 容器內執行）：依 LiteLLM_SpendLogs 補結算或釋放逾時的 in_flight
 │   ├── runtime.py           # 由 Settings 組出 Services（lazy 單例）
 │   ├── config.py            # GOV_ 前綴的設定
 │   └── cli.py、cli_auth.py  # agw 指令與 device flow
 ├── policies/                # governance.rego、governance_llm.rego、Rego 測試、agents/tools/sanctions/meta 的 data.json
 ├── guardrails/              # injection_rules.json（注入規則與 rules_version）、presidio-constraints.txt
 ├── account_ops/             # 模擬下游 MCP server（三個 tool）
-├── litellm/                 # config.yaml（模型別名、fallback、MCP server、OBO、pinned_tools、guardrail）；config.fallback.yaml、config.spike.yaml 只用於驗證
-├── keycloak/                # realm-governance.json（測試帳號與 client；kyt-cli 的 direct access grants 供 kyt_agent 使用）
+├── litellm/                 # config.yaml（模型別名、fallback、probe 的測試單價、MCP server、OBO、pinned_tools、guardrail）；config.fallback.yaml、config.spike.yaml、config.spike-m5.yaml 只用於驗證
+├── keycloak/                # realm-governance.json（測試帳號與 client；kyt-cli 的 direct access grants 供 kyt_agent 使用；erin 只有 llm_quota_probe，供額度測試）
 ├── probe_mcp/               # 測試用上游 MCP server
-├── probe_llm/               # 測試用的 OpenAI 相容 provider（綁 127.0.0.1:8300），記錄請求並依 probe: 指令回應
-├── scripts/                 # M1 驗證腳本、agent_sim、llm_sim、demo_m2、demo_m4、make_keys
-│   └── spikes/              # M4 實作前的 hook 驗證（m4_spike、m4_hook_probe）
+├── probe_llm/               # 測試用的 OpenAI 相容 provider（綁 127.0.0.1:8300），記錄請求與 header 名稱並依 probe: 指令回應
+├── scripts/                 # M1 驗證腳本、agent_sim、llm_sim、budget_sim（帳本與 SpendLogs 查詢）、demo_m2、demo_m4、demo_m5、make_keys
+│   └── spikes/              # M4、M5 實作前的 hook 驗證（m4_spike、m4_hook_probe、m5_spike、m5_budget_probe）
 ├── tests/                   # 單元測試；integration/ 需要 docker compose 服務
 ├── docs/                    # specs/、plans/、spikes/、images/architecture.svg（README 最上方的能力架構圖，新增或移除能力時同步編輯）
 └── var/                     # 執行產物，含 keys.json（不進版控）
@@ -45,7 +48,8 @@ ai-gov-gateway/
 
 LiteLLM 固定在 v1.105.1：tool 定義鎖定從此版起才有；`plugin.py` 依賴 `CustomGuardrail` 介面、`litellm.proxy.proxy_server.app`（含已建好的 `middleware_stack`）與 hook 的 `mcp_*` 欄位。
 LLM guardrail 另外依賴 `call_type` 的值（`acompletion`）、`litellm_call_id` 在 pre-call 與 post-call 之間不變、`proxy_server_request.body`，以及 streaming 時不呼叫 success hook（`docs/spikes/m4-findings.md` A1–A6）。
-**升級 LiteLLM 前必須跑 `uv run pytest -m integration`**（含 gateway 與 LLM guardrail 的契約測試），結果須為 32 passed 而非 skipped，並跑 `uv run python -m scripts.demo_m4` 確認 13/13。兩者都使用正式的 `kyt-agent@1.5` key 搭配 probe 模型，tpm 情境會等限流視窗過去，各多約 1 分鐘。
+依使用者的額度另外依賴（`docs/spikes/m5-findings.md` B1–B10）：`data["secret_fields"]["raw_headers"]` 含原始的 `Authorization`；key 的認證在 guardrail 之前、以 `x-litellm-api-key` 優先；`async_log_success_event` 每個請求一次，`kwargs["litellm_call_id"]` 與 `standard_logging_object` 的 `response_cost`、`prompt_tokens`、`completion_tokens`、`metadata.user_api_key_hash`；pre-call 改寫的 `max_tokens` 會送到 provider；對帳讀 `LiteLLM_SpendLogs` 的 `litellm_call_id`、`api_key`、`status`、`spend`、`prompt_tokens`、`completion_tokens`。
+**升級 LiteLLM 前必須跑 `uv run pytest -m integration`**（含 gateway、LLM guardrail 與額度的契約測試），結果須為 69 passed 而非 skipped，並跑 `uv run python -m scripts.demo_m4` 確認 13/13、`uv run python -m scripts.demo_m5` 確認 19/19。三者都使用正式的 `kyt-agent@1.5` key 搭配 probe 模型，tpm 情境會等限流視窗過去，整合測試約 2 分半、`demo_m4` 多約 1 分鐘。
 升級後也要重新比對 Presidio 的相依：映像內 `pip freeze` 的既有套件不能被改版。
 
 `engine/` 不 import LiteLLM、FastAPI 與 `config`；依賴方向為 `plugin` / `api` → `runtime` → `engine` / `config`，`runtime` 負責把設定注入引擎。
@@ -68,6 +72,7 @@ docker compose up -d --build
 uv run pytest
 uv run pytest -m integration
 uv run python -m scripts.demo_m4
+uv run python -m scripts.demo_m5
 uv run ruff format . && uv run ruff check . && uv run mypy src
 docker run --rm -v "$PWD/policies:/policies:ro" openpolicyagent/opa:1.21.1 test /policies
 ```
@@ -90,6 +95,9 @@ docker run --rm -v "$PWD/policies:/policies:ro" openpolicyagent/opa:1.21.1 test 
 - `llm_guardrail` 稽核只記 PII 類型與數量、規則編號與內容的 sha256，不記原值與 tool 原文
 - 新增 LLM 請求欄位前，確認它會被遮蔽或屬於開發者定義的內容，再加入 `engine/guardrails/fields.py` 的白名單
 - 受治理的 key 一律以 `<agent>@<版本>` 命名並在 `policies/agents/data.json` 的 `versions` 註冊；一個版本一把 key，LLM 與 tool 呼叫共用，兩條路徑都以 `governance.rego` 的 `registered` 判斷。新增 LLM 路徑的檢查時不要只看 `@` 之前的 agent 名稱
+- LLM 路徑的使用者身份只來自驗證過的 token；`user`、`metadata.user_id`、`x-litellm-end-user-id` 等 client 自帶的身份一律拒絕，不要改成覆寫（LiteLLM 在 hook 之前就用這些值建立 end user 並記錄）
+- 不要設定 LiteLLM 的 `user_header_mappings`、`user_header_name`、`max_end_user_budget_id`：它們讓 client 的 header 成為 end user 身份或預算的依據
+- 受治理的模型別名與它的 fallback 都要有單價（`litellm.model_cost` 或 deployment 的 `model_info`）；沒有單價時成本為 0，個人預算形同虛設，gateway 會回 503 `budget_unavailable`
 - 受治理的 key 一律設 `allowed_routes`（`scripts/make_keys.py` 的 `LLM_ROUTES`、`MCP_ROUTES`）：provider pass-through、files、threads 不經過 pre-call hook，沒有限制路由就能繞過 guardrail
 
 ## 已知問題
