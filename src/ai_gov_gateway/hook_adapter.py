@@ -238,6 +238,70 @@ class PendingPseudonyms:
         return (owner, call_id)
 
 
+class AdmittedCalls:
+    """這個 process 放行過、還沒結束的請求；failure hook 只釋放其中的請求。
+
+    client 可用 x-litellm-call-id 沿用進行中的 call_id；被拒絕的那個請求也會觸發 failure hook，
+    所以記下拒絕的次數，先抵銷這些 failure，才不會釋放原本那筆。
+    """
+
+    def __init__(
+        self,
+        *,
+        max_entries: int = 10_000,
+        ttl_seconds: float = 600.0,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        # (owner, call_id) → (放行時間, 尚未抵銷的拒絕次數)
+        self._entries: OrderedDict[PendingKey, tuple[float, int]] = OrderedDict()
+        self._max_entries = max_entries
+        self._ttl = ttl_seconds
+        self._clock = clock
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+    def add(self, owner: str | None, call_id: object) -> None:
+        key = PendingPseudonyms._key(owner, call_id)
+        if key is None:
+            return
+        self._expire()
+        self._entries[key] = (self._clock(), 0)
+        while len(self._entries) > self._max_entries:
+            self._entries.popitem(last=False)
+
+    def rejected(self, owner: str | None, call_id: object) -> None:
+        """pre-call 拒絕了沿用這個 call_id 的另一個請求。"""
+        key = PendingPseudonyms._key(owner, call_id)
+        entry = self._entries.get(key) if key else None
+        if key is not None and entry is not None:
+            self._entries[key] = (entry[0], entry[1] + 1)
+
+    def pop_for_release(self, owner: str | None, call_id: object) -> bool:
+        """failure hook 用：是這個 process 放行的請求才回傳 True，且只回傳一次。"""
+        self._expire()
+        key = PendingPseudonyms._key(owner, call_id)
+        entry = self._entries.get(key) if key else None
+        if key is None or entry is None:
+            return False
+        if entry[1]:
+            self._entries[key] = (entry[0], entry[1] - 1)
+            return False
+        del self._entries[key]
+        return True
+
+    def forget(self, owner: str | None, call_id: object) -> None:
+        """請求已成功結束；之後同一個 call_id 的 failure 都不是這個請求的。"""
+        key = PendingPseudonyms._key(owner, call_id)
+        if key is not None:
+            self._entries.pop(key, None)
+
+    def _expire(self) -> None:
+        cutoff = self._clock() - self._ttl
+        while self._entries and next(iter(self._entries.values()))[0] <= cutoff:
+            self._entries.popitem(last=False)
+
+
 class RestoreError(Exception):
     """還原代號失敗；訊息只有例外類別名稱，hook 轉成 502。"""
 

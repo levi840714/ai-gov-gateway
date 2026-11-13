@@ -24,6 +24,7 @@ from ai_gov_gateway.engine.models import Outcome
 from ai_gov_gateway.engine.pricing import priced_aliases
 from ai_gov_gateway.engine.store import StoreUnavailable
 from ai_gov_gateway.hook_adapter import (
+    AdmittedCalls,
     DuplicateCallId,
     PendingPseudonyms,
     PseudonymsEvicted,
@@ -124,6 +125,7 @@ CHAT_CALL_TYPES = frozenset({"acompletion"})
 MCP_CALL_TYPE = "call_mcp_tool"
 # 對照表只放在這個 process 的記憶體；放進 data 的 metadata 會被 LiteLLM 的 callback 記錄
 _PENDING = PendingPseudonyms()
+_ADMITTED = AdmittedCalls()
 
 
 def _reject(status: int, code: str) -> HTTPException:
@@ -148,16 +150,18 @@ class LlmGuardrailHook(CustomGuardrail):
         if call_type not in CHAT_CALL_TYPES:
             raise _reject(400, "call_type_not_governed")
         call_id = data.get("litellm_call_id")
+        request = llm_request_from_hook(data, user_api_key_dict)
         try:
             check_request(client_body(data), data)
-            gate = (await get_services()).llm_gate
-            admitted = await gate.admit(llm_request_from_hook(data, user_api_key_dict))
-        except GuardrailError as error:
-            raise HTTPException(status_code=error.status, detail=error.body()) from None
+            admitted = await (await get_services()).llm_gate.admit(request)
         except Exception as error:
+            _ADMITTED.rejected(request.owner, request.call_id)
+            if isinstance(error, GuardrailError):
+                raise HTTPException(status_code=error.status, detail=error.body()) from None
             # 只記錄例外類別：訊息可能含使用者內容
             logger.error("llm guardrail failed: %s", type(error).__name__)
             raise _reject(503, "guardrail_unavailable") from None
+        _ADMITTED.add(request.owner, request.call_id)
         if admitted.pseudonyms:
             owner = owner_of(user_api_key_dict)
             if owner is None or not isinstance(call_id, str) or not call_id:
@@ -175,11 +179,16 @@ class LlmGuardrailHook(CustomGuardrail):
     async def async_log_success_event(
         self, kwargs: dict[str, Any], response_obj: Any, start_time: Any, end_time: Any
     ) -> None:
+        # MCP 等其他呼叫也會觸發；帳本只有 chat 的請求
+        if kwargs.get("call_type") not in CHAT_CALL_TYPES:
+            return
         # M5 spike B3：streaming 結束與 fallback 成功時各一次；成本以 LiteLLM 的計費為準
         settlement = settlement_from_log(kwargs, at=utc_now())
         if settlement is None:
             logger.error("llm usage settlement skipped: missing fields")
             return
+        # 結算不依賴 _ADMITTED：其他 worker 放行或已被回收的請求也要結算
+        _ADMITTED.forget(settlement.owner, settlement.call_id)
         try:
             await (await get_services()).llm_gate.settle(settlement)
         except Exception as error:
@@ -205,8 +214,10 @@ class LlmGuardrailHook(CustomGuardrail):
         user_api_key_dict: Any,
         traceback_str: str | None = None,
     ) -> None:
-        # MCP 被治理擋下時也會呼叫；call_id 不在表或帳本中就什麼都不做
+        # MCP 被擋下、或沿用進行中 call_id 的請求被拒絕時也會呼叫；不是這裡放行的就不動原本那筆
         owner, call_id = owner_of(user_api_key_dict), request_data.get("litellm_call_id")
+        if not _ADMITTED.pop_for_release(owner, call_id):
+            return
         _PENDING.discard(owner, call_id)
         try:
             await (await get_services()).llm_gate.release(owner, call_id)

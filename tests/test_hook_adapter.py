@@ -10,6 +10,7 @@ from ai_gov_gateway.engine.guardrails.pii import PseudonymMap
 from ai_gov_gateway.engine.ledger import Settlement
 from ai_gov_gateway.engine.llm_gate import LlmRequest
 from ai_gov_gateway.hook_adapter import (
+    AdmittedCalls,
     DuplicateCallId,
     PendingPseudonyms,
     PseudonymsEvicted,
@@ -438,3 +439,61 @@ def test_settlement_cost_drops_float_error():
 )
 def test_settlement_missing_fields_returns_none(broken):
     assert settlement_from_log(broken, at=NOW) is None
+
+
+def test_admitted_call_is_released_once():
+    admitted = AdmittedCalls()
+    admitted.add("o", "c1")
+    assert admitted.pop_for_release("o", "c1") is True
+    assert admitted.pop_for_release("o", "c1") is False
+
+
+def test_rejected_duplicate_does_not_release_the_original():
+    admitted = AdmittedCalls()
+    admitted.add("o", "c1")
+    admitted.rejected("o", "c1")
+    assert admitted.pop_for_release("o", "c1") is False  # 被拒絕的重複請求
+    assert admitted.pop_for_release("o", "c1") is True  # 原本的請求失敗
+
+
+def test_success_forgets_the_call():
+    admitted = AdmittedCalls()
+    admitted.add("o", "c1")
+    admitted.rejected("o", "c1")
+    admitted.forget("o", "c1")
+    assert admitted.pop_for_release("o", "c1") is False
+    assert len(admitted) == 0
+
+
+def test_rejection_of_unknown_call_is_ignored():
+    admitted = AdmittedCalls()
+    admitted.rejected("o", "c1")
+    admitted.add("o", "c1")
+    assert admitted.pop_for_release("o", "c1") is True
+
+
+def test_admitted_calls_expire():
+    clock = _Clock()
+    admitted = AdmittedCalls(ttl_seconds=600, clock=clock)
+    admitted.add("o", "c1")
+    clock.now += 601
+    assert admitted.pop_for_release("o", "c1") is False
+    assert len(admitted) == 0
+
+
+def test_admitted_calls_are_bounded():
+    admitted = AdmittedCalls(max_entries=2)
+    for call_id in ("c1", "c2", "c3"):
+        admitted.add("o", call_id)
+    assert len(admitted) == 2
+    assert admitted.pop_for_release("o", "c1") is False
+    assert admitted.pop_for_release("o", "c3") is True
+
+
+@pytest.mark.parametrize(("owner", "call_id"), [(None, "c1"), ("o", None), ("o", ""), ("o", 5)])
+def test_admitted_calls_ignore_missing_keys(owner, call_id):
+    admitted = AdmittedCalls()
+    admitted.add(owner, call_id)
+    admitted.rejected(owner, call_id)
+    assert admitted.pop_for_release(owner, call_id) is False
+    assert len(admitted) == 0
