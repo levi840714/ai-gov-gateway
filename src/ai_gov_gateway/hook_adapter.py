@@ -27,6 +27,28 @@ def _bearer(value: object) -> str | None:
     return token[7:].strip() if token.lower().startswith("bearer ") else token
 
 
+# LiteLLM 不論設定一律讀這兩個 header 當 end user id，client 帶了就拒絕
+END_USER_HEADERS = ("x-litellm-customer-id", "x-litellm-end-user-id")
+
+
+def _raw_headers(data: Mapping[str, Any]) -> dict[str, str]:
+    """原始 header 只在 secret_fields，proxy_server_request 已遮蔽（M5 spike B1）。"""
+    secret = data.get("secret_fields")
+    headers = secret.get("raw_headers") if isinstance(secret, Mapping) else None
+    if not isinstance(headers, Mapping):
+        return {}
+    return {str(k).lower(): v for k, v in headers.items() if isinstance(v, str)}
+
+
+def user_token_from_hook(data: Mapping[str, Any]) -> str | None:
+    return _bearer(_raw_headers(data).get("authorization"))
+
+
+def end_user_header(data: Mapping[str, Any]) -> str | None:
+    headers = _raw_headers(data)
+    return next((name for name in END_USER_HEADERS if name in headers), None)
+
+
 def tool_call_from_hook(data: Mapping[str, Any], key_alias: str | None) -> ToolCall:
     """LiteLLM v1.105.1 pre_mcp_call 的欄位；缺漏時留空，由 policy 判為 unknown_tool。"""
     arguments = data.get("mcp_arguments")

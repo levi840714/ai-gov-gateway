@@ -4,6 +4,7 @@ tools、response_format 的 schema 與 stop 由開發者定義，允許但不遮
 這些都是已知限制。
 """
 
+import json
 import re
 from collections.abc import Mapping
 from typing import Any
@@ -23,6 +24,7 @@ REQUEST_FIELDS = frozenset(
         "n",
         "stop",
         "seed",
+        # 由 LlmGate 以 end_user_override 拒絕並寫稽核；在這裡拒絕就不會留下稽核
         "user",
         "tools",
         "tool_choice",
@@ -71,6 +73,48 @@ def check_request(body: Mapping[str, Any] | None, data: Mapping[str, Any]) -> No
         for message in messages:
             if isinstance(message, Mapping):
                 _check_message(message)
+
+
+def end_user_field(body: Mapping[str, Any] | None) -> str | None:
+    """client 自帶的 end user 身份欄位名稱；LiteLLM 會拿這些欄位當 end user id。"""
+    if body is None:
+        return None
+    if "user" in body:
+        return "user"
+    metadata = body.get("metadata")
+    if isinstance(metadata, str):
+        try:
+            metadata = json.loads(metadata)
+        except ValueError:
+            return None
+    if isinstance(metadata, Mapping):
+        return next((f"metadata.{k}" for k in ("user_id", "user") if k in metadata), None)
+    return None
+
+
+def text_length(messages: Any) -> int:
+    """訊息文字（含多段內容的文字段）與 tool call 參數的字元數；不含 id 與名稱。"""
+    if not isinstance(messages, list):
+        return 0
+    total = 0
+    for message in messages:
+        if not isinstance(message, Mapping):
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            total += len(content)
+        elif isinstance(content, list):
+            total += sum(
+                len(part["text"])
+                for part in content
+                if isinstance(part, Mapping) and isinstance(part.get("text"), str)
+            )
+        calls = message.get("tool_calls")
+        for call in calls if isinstance(calls, list) else []:
+            function = call.get("function") if isinstance(call, Mapping) else None
+            arguments = function.get("arguments") if isinstance(function, Mapping) else None
+            total += len(arguments) if isinstance(arguments, str) else 0
+    return total
 
 
 def _check_message(message: Mapping[str, Any]) -> None:

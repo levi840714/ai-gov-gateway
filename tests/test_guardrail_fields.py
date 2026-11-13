@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from ai_gov_gateway.engine.guardrails.fields import check_request
+from ai_gov_gateway.engine.guardrails.fields import check_request, end_user_field, text_length
 from ai_gov_gateway.engine.guardrails.models import GuardrailError
 
 PII = "A123456789"
@@ -122,3 +122,38 @@ def test_image_parts_with_url_and_detail_pass(detail):
 def test_image_parts_reject_other_shapes(image, field):
     message = {"role": "user", "content": [{"type": "image_url", "image_url": image}]}
     assert _field({"model": "m", "messages": [message]}) == field
+
+
+@pytest.mark.parametrize(
+    ("body", "field"),
+    [
+        ({"user": "alice"}, "user"),
+        ({"metadata": {"user_id": "x"}}, "metadata.user_id"),
+        ({"metadata": {"user": "x"}}, "metadata.user"),
+        ({"metadata": '{"user_id": "x"}'}, "metadata.user_id"),  # LiteLLM 也會解析字串形式
+        ({"user": ""}, "user"),  # 空字串 LiteLLM 雖然不採用，仍視為自帶身份
+    ],
+)
+def test_end_user_field_detected(body, field):
+    assert end_user_field(body) == field
+
+
+def test_no_end_user_field():
+    assert end_user_field({"model": "m", "messages": [], "metadata": {"tag": "x"}}) is None
+    assert end_user_field(None) is None
+    assert end_user_field({"metadata": "not json"}) is None
+
+
+def test_text_length_counts_content_and_tool_arguments():
+    messages = [
+        {"role": "user", "content": "你好"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {"id": "t", "type": "function", "function": {"name": "f", "arguments": '{"a":1}'}}
+            ],
+        },
+        {"role": "user", "content": [{"type": "text", "text": "abc"}]},
+    ]
+    assert text_length(messages) == 2 + 7 + 3

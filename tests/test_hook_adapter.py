@@ -10,11 +10,13 @@ from ai_gov_gateway.hook_adapter import (
     PseudonymsEvicted,
     RestoreError,
     client_body,
+    end_user_header,
     has_ambiguous_authorization,
     owner_of,
     restore_response,
     restore_stream,
     tool_call_from_hook,
+    user_token_from_hook,
 )
 
 # LiteLLM v1.105.1 call_mcp_tool 的 data 欄位（M1 V7 實際觀察）
@@ -304,3 +306,29 @@ def test_evicted_keys_are_bounded():
     assert pending.pop("o", "a") is None
     with pytest.raises(PseudonymsEvicted):
         pending.pop("o", "b")
+
+
+def _data(**headers: str) -> dict:
+    return {"secret_fields": {"raw_headers": headers}}
+
+
+def test_user_token_from_raw_authorization():
+    assert user_token_from_hook(_data(authorization="Bearer eyJ.a.b")) == "eyJ.a.b"
+
+
+def test_user_token_missing_when_no_secret_fields():
+    assert user_token_from_hook({}) is None
+    assert user_token_from_hook(_data()) is None
+
+
+def test_user_token_header_name_is_case_insensitive():
+    assert user_token_from_hook(_data(Authorization="Bearer t")) == "t"
+
+
+@pytest.mark.parametrize("name", ["x-litellm-customer-id", "X-LiteLLM-End-User-Id"])
+def test_end_user_header_detected(name):
+    assert end_user_header(_data(**{name: "someone"})) == name.lower()
+
+
+def test_no_end_user_header():
+    assert end_user_header(_data(authorization="Bearer t")) is None
