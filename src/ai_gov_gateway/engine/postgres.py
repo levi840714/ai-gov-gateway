@@ -521,7 +521,9 @@ class PostgresStore:
             # 同一筆的另一個結算事件可能在等鎖期間完成
             if row is None or row["status"] == "settled":
                 return None
-            settlement = await _in_lock_order(conn, row, settlement)
+            # 對帳補結算的是舊請求，要保留它真實的時間
+            if settlement.settled_by == "callback":
+                settlement = await _in_lock_order(conn, row, settlement)
             overage = compute_overage(await _settle_context(conn, row, settlement, tz))
             await conn.execute(
                 SETTLE_UPDATE,

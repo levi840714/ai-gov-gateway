@@ -1,5 +1,5 @@
 import argparse
-from datetime import timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -36,8 +36,13 @@ class FakeSpendLogs:
         return self.logs.get(call_id, [])
 
 
-def _log(status: str = "success", spend: float = 0.5, api_key: str = API_KEY) -> SpendLog:
-    return SpendLog(status, spend, 100, 20, api_key)
+def _log(
+    status: str = "success",
+    spend: float = 0.5,
+    api_key: str = API_KEY,
+    end_time: datetime | None = None,
+) -> SpendLog:
+    return SpendLog(status, spend, 100, 20, api_key, end_time)
 
 
 class Harness:
@@ -102,6 +107,21 @@ async def test_success_log_settles_with_reconcile_tag():
     assert (row.status, row.cost, row.tokens) == ("settled", Decimal("3.0"), 120)
     event = next(e for e in h.store.audit if e.event_type == "llm_limit_exceeded")
     assert event.details["settled_by"] == "reconcile"
+
+
+async def test_settlement_uses_the_logs_end_time():
+    h = Harness()
+    h.seed("c1", ago=timedelta(minutes=30))
+    ended = h.clock.now - timedelta(minutes=25)
+    await h.run(FakeSpendLogs({"c1": [_log(end_time=ended)]}))
+    assert h.ledger.rows[(OWNER, "c1")].settled_at == ended
+
+
+async def test_settlement_falls_back_to_now_without_end_time():
+    h = Harness()
+    h.seed("c1", ago=timedelta(minutes=30))
+    await h.run(FakeSpendLogs({"c1": [_log()]}))
+    assert h.ledger.rows[(OWNER, "c1")].settled_at == h.clock.now
 
 
 async def test_failure_only_releases():

@@ -23,6 +23,8 @@ def priced_aliases(
             deployments.setdefault(alias, []).append(_deployment_priced(deployment, model_cost))
     # 不存在的 fallback 別名沒有 deployment，視為沒有單價
     own = {alias for alias, priced in deployments.items() if all(priced)}
+    # 只跟隨 router 的 fallbacks；default、context_window、content_policy fallbacks 未使用，
+    # 引入時要一併納入檢查
     chains = _fallback_map(fallbacks or [])
     return frozenset(alias for alias in own if _reachable(alias, chains) <= own)
 

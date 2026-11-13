@@ -7,7 +7,7 @@ import re
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Protocol
 
@@ -31,6 +31,7 @@ class SpendLog:
     prompt_tokens: int
     completion_tokens: int
     api_key: str  # LiteLLM 存的 key 雜湊；owner 是它的 sha256
+    end_time: datetime | None = None  # 請求結束時間（UTC）；缺漏時以對帳當下代替
 
 
 class SpendLogReader(Protocol):
@@ -58,13 +59,23 @@ class PostgresSpendLogs:
 
     async def find(self, call_id: str) -> list[SpendLog]:
         query = (
-            "SELECT status, spend, prompt_tokens, completion_tokens, api_key "
+            'SELECT status, spend, prompt_tokens, completion_tokens, api_key, "endTime" '
             'FROM "LiteLLM_SpendLogs" WHERE litellm_call_id = %s'
         )
         async with await psycopg.AsyncConnection.connect(self._url) as conn:
             cursor = await conn.execute(query, (call_id,))
             rows = await cursor.fetchall()
-        return [SpendLog(str(r[0]), float(r[1]), int(r[2]), int(r[3]), str(r[4])) for r in rows]
+        return [
+            SpendLog(str(r[0]), float(r[1]), int(r[2]), int(r[3]), str(r[4]), _utc(r[5]))
+            for r in rows
+        ]
+
+
+def _utc(value: datetime | None) -> datetime | None:
+    # Prisma 的 DateTime 是不含時區的 UTC
+    if value is None:
+        return None
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
 async def reconcile(
@@ -92,7 +103,8 @@ async def reconcile(
                 cost_usd=Decimal(str(round(success.spend, 12))),
                 prompt_tokens=success.prompt_tokens,
                 completion_tokens=success.completion_tokens,
-                at=clock(),
+                # 用請求的結束時間，舊用量才不會落進目前的 tpm 視窗；沒有 endTime 時退回現在
+                at=success.end_time or clock(),
                 settled_by="reconcile",
             )
             if await gate.settle(settlement):

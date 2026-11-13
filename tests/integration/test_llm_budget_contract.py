@@ -278,6 +278,25 @@ def test_rpm_per_user(erin):
     assert 1 <= body["limit"]["retry_after_seconds"] <= 60
 
 
+def test_concurrency_limit(erin):
+    token = user_token(QUOTA_USER)
+    concurrent = TIER["max_concurrent"]
+    with ThreadPoolExecutor(concurrent) as pool:
+        slow = [
+            pool.submit(send, 1, "probe:chunk_delay=1", token=token, stream=True)
+            for _ in range(concurrent)
+        ]
+        # 等三筆都放行後，第四筆才會看到同時進行數已滿
+        time.sleep(1)
+        extra = send(token=token)
+        statuses = [future.result().status_code for future in slow]
+    body = governance(extra)
+    assert statuses == [200] * concurrent
+    assert extra.status_code == 429, extra.text
+    assert body["reasons"] == ["user_rate_limited"]
+    assert body["limit"]["type"] == "concurrency"
+
+
 def test_rejected_request_releases_row(erin):
     # probe-fallback 沒有下一層 fallback：放行後 provider 一律失敗，由 failure hook 釋放
     try:

@@ -3,7 +3,7 @@ import os
 import random
 from datetime import datetime, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
 import psycopg
@@ -92,6 +92,7 @@ def _settlement(
     at: datetime = NOW + timedelta(seconds=1),
     owner: str = "owner-a",
     tokens: tuple[int, int] = (100, 50),
+    settled_by: Literal["callback", "reconcile"] = "callback",
 ) -> Settlement:
     return Settlement(
         owner=owner,
@@ -100,7 +101,7 @@ def _settlement(
         prompt_tokens=tokens[0],
         completion_tokens=tokens[1],
         at=at,
-        settled_by="callback",
+        settled_by=settled_by,
     )
 
 
@@ -357,6 +358,19 @@ async def test_settlement_time_follows_lock_order(store):
     assert row is not None and row["settled_at"] == later
     [record] = await store.audit_records()
     assert record.ts == later
+
+
+async def test_reconcile_settlement_keeps_its_real_time(store):
+    # 對帳補結算的是舊請求：不套用鎖順序調整，也不落進目前的 tpm 視窗
+    await _seed(store, "c0", "0.01")
+    await _admit(store, "old", now=NOW - timedelta(hours=1))
+    old_end = NOW - timedelta(minutes=59)
+    settlement = _settlement("old", "0.01", at=old_end, settled_by="reconcile")
+    assert await store.settle(settlement, TZ, _audit) is not None
+    row = await _row("old")
+    assert row is not None and row["settled_at"] == old_end
+    snapshot = await _snapshot(store, NOW + timedelta(seconds=2))
+    assert snapshot.minute_tokens == 150
 
 
 async def test_audit_failure_rolls_back_settlement(store):

@@ -20,6 +20,7 @@ from ai_gov_gateway.engine.clock import utc_now
 from ai_gov_gateway.engine.guardrails.fields import check_request
 from ai_gov_gateway.engine.guardrails.models import GuardrailError
 from ai_gov_gateway.engine.guardrails.pii import PseudonymMap
+from ai_gov_gateway.engine.llm_gate import LlmRequest
 from ai_gov_gateway.engine.models import Outcome
 from ai_gov_gateway.engine.pricing import priced_aliases
 from ai_gov_gateway.engine.store import StoreUnavailable
@@ -149,12 +150,14 @@ class LlmGuardrailHook(CustomGuardrail):
             return data
         if call_type not in CHAT_CALL_TYPES:
             raise _reject(400, "call_type_not_governed")
-        request = llm_request_from_hook(data, user_api_key_dict)
+        request: LlmRequest | None = None
         try:
+            request = llm_request_from_hook(data, user_api_key_dict)
             check_request(client_body(data), data)
             admitted = await (await get_services()).llm_gate.admit(request)
         except Exception as error:
-            _ADMITTED.rejected(request.owner, request.call_id)
+            if request is not None:
+                _ADMITTED.rejected(request.owner, request.call_id)
             if isinstance(error, GuardrailError):
                 raise HTTPException(status_code=error.status, detail=error.body()) from None
             # 只記錄例外類別：訊息可能含使用者內容
