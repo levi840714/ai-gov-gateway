@@ -17,7 +17,7 @@ from ai_gov_gateway.engine.guardrails.pii import PseudonymMap
 from ai_gov_gateway.engine.guardrails.service import LlmGuardrail, Message, access_event
 from ai_gov_gateway.engine.ledger import (
     Admission,
-    DuplicateCallId,
+    CallIdInUse,
     LedgerUnavailable,
     SettledRow,
     Settlement,
@@ -42,6 +42,7 @@ class LlmRequest:
     messages: list[Message]
     max_tokens: object
     max_completion_tokens: object
+    n: object = None
 
 
 @dataclass
@@ -117,7 +118,7 @@ class LlmGate:
         try:
             overage = await self._ledger.settle(settlement, self._tz, _limit_exceeded_event)
         except Exception as error:
-            logger.error("llm usage settlement failed: %s", type(error).__name__)
+            logger.error("llm usage settlement failed: %s", _failure_name(error))
             return False
         return overage is not None
 
@@ -127,7 +128,7 @@ class LlmGate:
         try:
             return await self._ledger.release(owner, call_id)
         except Exception as error:
-            logger.error("llm usage release failed: %s", type(error).__name__)
+            logger.error("llm usage release failed: %s", _failure_name(error))
             return False
 
     async def _authenticate(self, caller: _Caller) -> UserIdentity:
@@ -145,6 +146,13 @@ class LlmGate:
         放在 guardrail 之前：被拒絕的請求不做 PII 偵測，也不留下 llm_guardrail 稽核。
         """
         request = caller.request
+        # n 個回應會讓單筆成本變成 n 倍，超過 spec §8.6 的上界；bool 是 int 的子類別
+        if request.n is not None and (
+            not isinstance(request.n, int) or isinstance(request.n, bool) or request.n != 1
+        ):
+            await self._deny(
+                caller, GuardrailError(400, "unsupported_field", field="n"), {"field": "n"}
+            )
         values = {
             "max_tokens": request.max_tokens,
             "max_completion_tokens": request.max_completion_tokens,
@@ -193,11 +201,11 @@ class LlmGate:
         check = partial(check_admission, limits=limits, now=now, tz=self._tz)
         try:
             denial = await self._ledger.admit(admission, check)
-        except (LedgerUnavailable, DuplicateCallId) as failure:
+        except (LedgerUnavailable, CallIdInUse) as failure:
             raise GuardrailError(503, "budget_unavailable") from failure
         if denial is not None:
             rejection = GuardrailError(denial.status, denial.code, limit=denial.limit)
-            await self._deny(caller, rejection, {"limit": denial.limit, **denial.details})
+            await self._deny(caller, rejection, denial.audit_details())
 
     def _is_priced(self, model: str) -> bool:
         # 單價表由 runtime 在第一次使用時建立；取不到時無法計算成本，一律拒絕
@@ -216,6 +224,14 @@ class LlmGate:
         except (StoreUnavailable, StoreError) as failure:
             raise GuardrailError(503, "audit_write_failed") from failure
         raise error
+
+
+def _failure_name(error: Exception) -> str:
+    """只記錄例外類別（含帳本包裝前的原因）：訊息可能含使用者資料。"""
+    cause = error.__cause__
+    if cause is None:
+        return type(error).__name__
+    return f"{type(error).__name__} (cause: {type(cause).__name__})"
 
 
 def _access_event(caller: _Caller, code: str, extra: dict[str, Any]) -> AuditEvent:

@@ -15,7 +15,7 @@ from psycopg.rows import dict_row
 from ai_gov_gateway.engine.audit import first_invalid
 from ai_gov_gateway.engine.ledger import (
     Admission,
-    DuplicateCallId,
+    CallIdInUse,
     LedgerUnavailable,
     SettledRow,
     Settlement,
@@ -371,7 +371,7 @@ async def test_different_users_do_not_block(store):
 
 async def test_duplicate_call_id_raises(store):
     await _admit(store, "c1")
-    with pytest.raises(DuplicateCallId):
+    with pytest.raises(CallIdInUse):
         await store.admit(_admission("c1"), _allow)
     await _admit(store, "c1", owner="owner-b")
 

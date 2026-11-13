@@ -353,6 +353,11 @@ def _chat_data(**extra) -> dict:
     }
 
 
+def test_llm_request_carries_n():
+    request = llm_request_from_hook(_chat_data(n=2), NS(key_alias=None, token=None))
+    assert request.n == 2
+
+
 def test_llm_request_from_hook():
     key = NS(key_alias="kyt-agent@1.6", token="hashed-key")
     request = llm_request_from_hook(_chat_data(max_tokens=17), key)
@@ -366,6 +371,7 @@ def test_llm_request_from_hook():
         messages=[{"role": "user", "content": "hi"}],
         max_tokens=17,
         max_completion_tokens=None,
+        n=None,
     )
     assert "eyJ" not in repr(request)
 
@@ -497,3 +503,24 @@ def test_admitted_calls_ignore_missing_keys(owner, call_id):
     admitted.rejected(owner, call_id)
     assert admitted.pop_for_release(owner, call_id) is False
     assert len(admitted) == 0
+
+
+@pytest.mark.parametrize(
+    ("extra", "expected"),
+    [
+        ({"user": "x"}, "user"),
+        ({"metadata": {"user_id": "x"}}, "metadata.user_id"),
+        ({"metadata": {"user": "x"}}, "metadata.user"),
+    ],
+)
+def test_end_user_override_falls_back_to_data_without_client_body(extra, expected):
+    data = {**_chat_data(**extra), "proxy_server_request": {"body": None}}
+    request = llm_request_from_hook(data, NS(key_alias=None, token=None))
+    assert request.end_user_override == expected
+
+
+def test_litellm_own_metadata_is_not_an_end_user_override():
+    metadata = {"user_api_key_user_id": "u", "user_api_key_hash": "h", "user_api_key_alias": "a"}
+    data = {**_chat_data(metadata=metadata), "proxy_server_request": {}}
+    request = llm_request_from_hook(data, NS(key_alias=None, token=None))
+    assert request.end_user_override is None

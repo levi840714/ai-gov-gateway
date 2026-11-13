@@ -47,6 +47,10 @@ class FakeTokenVerifier:
         raise TokenError("InvalidSignatureError")
 
 
+class OperationalError(Exception):
+    pass
+
+
 @dataclass
 class Harness:
     gate: LlmGate
@@ -92,6 +96,7 @@ def _request(**overrides) -> LlmRequest:
         "messages": [{"role": "user", "content": "寄給 amy@example.com"}],
         "max_tokens": None,
         "max_completion_tokens": None,
+        "n": None,
     }
     return LlmRequest(**{**fields, **overrides})
 
@@ -237,6 +242,28 @@ async def test_max_tokens_within_cap_kept(limits):
     assert admitted.max_tokens is None
 
 
+@pytest.mark.parametrize("value", [None, 1])
+async def test_n_absent_or_one_allowed(value):
+    admitted = await _harness().gate.admit(_request(n=value))
+    assert admitted.max_tokens == 4096
+
+
+@pytest.mark.parametrize("value", [2, 0, True, "2", 1.0])
+async def test_n_other_than_one_rejected_before_guardrail(value):
+    h = _harness()
+    error = await _denied(h, _request(n=value))
+    assert (error.status, error.code, error.field) == (400, "unsupported_field", "n")
+    assert h.detector.threads == set()
+    assert _events(h, "llm_guardrail") == []
+    assert _events(h, "llm_access")[-1].details == {
+        "call_id": "call-1",
+        "model": MODEL,
+        "tier": "default",
+        "field": "n",
+    }
+    assert h.ledger.rows == {}
+
+
 async def test_input_over_tier_limit():
     limits = {**guardrail_config().limits.model_dump(), "max_input_chars": 10}
     h = _harness(guardrail_config(limits=limits))
@@ -262,7 +289,7 @@ async def test_budget_reached():
         "call_id": "call-1",
         "model": MODEL,
         "tier": "default",
-        "limit": error.limit,
+        "limit": {"type": "budget_day", "resets_at": "2026-10-21T00:00:00+08:00"},
         "settled_usd": "2.0",
         "limit_usd": "2.0",
     }
@@ -277,7 +304,28 @@ async def test_rate_limited():
     error = await _denied(h, _request())
     assert (error.status, error.code) == (429, "user_rate_limited")
     assert error.limit == {"type": "rpm", "retry_after_seconds": 50}
-    assert _events(h, "llm_access")[-1].details["requests"] == 20
+    assert _events(h, "llm_access")[-1].details == {
+        "call_id": "call-1",
+        "model": MODEL,
+        "tier": "default",
+        "limit": {"type": "rpm", "retry_after_seconds": 50, "max": 20},
+        "requests": 20,
+    }
+
+
+async def test_tpm_limited_audit_details():
+    h = _harness()
+    _seed(h, "t1", status="settled", cost="0", ago=10)
+    h.ledger.rows[(OWNER, "t1")].tokens = 150_000
+    error = await _denied(h, _request())
+    assert (error.status, error.code) == (429, "user_rate_limited")
+    assert _events(h, "llm_access")[-1].details == {
+        "call_id": "call-1",
+        "model": MODEL,
+        "tier": "default",
+        "limit": {"type": "tpm", "retry_after_seconds": 50, "max": 150_000},
+        "tokens": 150_000,
+    }
 
 
 async def test_concurrency_limited():
@@ -287,6 +335,13 @@ async def test_concurrency_limited():
     error = await _denied(h, _request(call_id="c5"))
     assert (error.status, error.code) == (429, "user_rate_limited")
     assert error.limit["type"] == "concurrency"
+    assert _events(h, "llm_access")[-1].details == {
+        "call_id": "c5",
+        "model": MODEL,
+        "tier": "default",
+        "limit": {"type": "concurrency", "retry_after_seconds": 1, "max": 4},
+        "in_flight": 4,
+    }
     assert (OWNER, "c5") not in h.ledger.rows
 
 
@@ -420,7 +475,9 @@ async def test_release_without_owner_or_call_id_is_noop(owner, call_id):
 async def test_settle_and_release_never_raise(caplog):
     h = _harness()
     await h.gate.admit(_request())
-    h.ledger.fail = LedgerUnavailable("secret detail")
+    failure = LedgerUnavailable("secret detail")
+    failure.__cause__ = OperationalError("secret detail")
+    h.ledger.fail = failure
     settlement = Settlement(
         owner=OWNER,
         call_id="call-1",
@@ -434,7 +491,7 @@ async def test_settle_and_release_never_raise(caplog):
         await h.gate.settle(settlement)
         await h.gate.release(OWNER, "call-1")
     assert [r.getMessage() for r in caplog.records] == [
-        "llm usage settlement failed: LedgerUnavailable",
-        "llm usage release failed: LedgerUnavailable",
+        "llm usage settlement failed: LedgerUnavailable (cause: OperationalError)",
+        "llm usage release failed: LedgerUnavailable (cause: OperationalError)",
     ]
     assert "secret detail" not in caplog.text

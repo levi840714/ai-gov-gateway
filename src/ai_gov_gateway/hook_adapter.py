@@ -90,12 +90,14 @@ def llm_request_from_hook(data: Mapping[str, Any], user_api_key_dict: Any) -> Ll
         key_alias=getattr(user_api_key_dict, "key_alias", None),
         owner=owner_of(user_api_key_dict),
         user_token=user_token_from_hook(data),
-        end_user_override=end_user_header(data) or end_user_field(client_body(data)),
+        # 沒有 client body 時退回檢查 data，才不會漏掉自帶的身份欄位
+        end_user_override=end_user_header(data) or end_user_field(client_body(data) or data),
         model=model if isinstance(model, str) else None,
         call_id=call_id if isinstance(call_id, str) else None,
         messages=data.get("messages") or [],
         max_tokens=data.get("max_tokens"),
         max_completion_tokens=data.get("max_completion_tokens"),
+        n=data.get("n"),
     )
 
 

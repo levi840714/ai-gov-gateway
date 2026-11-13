@@ -116,7 +116,7 @@ M4 的處理順序加入這些步驟（粗體為新增）：
 2. 檢查請求欄位；**拒絕 client 自帶的 end user 身份**（§4.1）
 3. **驗證使用者 token**：與 MCP 路徑相同的 `TokenVerifier`（簽章、issuer、audience、到期、`azp` 在允許清單、`sub` 必填），以 `asyncio.to_thread` 執行
 4. 從 key 解析 agent 與版本，向 OPA 查詢註冊狀態、guardrail 設定與**此使用者的額度**（一次查詢）
-5. **檢查單次上限**：`max_tokens` / `max_completion_tokens` 沒帶就補上限、超過就拒絕；請求的文字超過等級的 `max_input_chars` 就拒絕
+5. **檢查單次上限**：`max_tokens` / `max_completion_tokens` 沒帶就補上限、超過就拒絕；`n` 不是 1 就拒絕；請求的文字超過等級的 `max_input_chars` 就拒絕
 6. 檢查大小（M4 的全域上限）
 7. 注入檢查、PII 假名化、spotlighting、guardrail 稽核（M4 不變）
 8. **放行判斷與記錄**：在帳本的交易中檢查同時進行數、rpm、tpm 與日、月預算，通過才寫入一筆 `in_flight`
@@ -217,6 +217,7 @@ B 可以在呼叫前預留最壞成本（§16），也可以事後累計。用 g
 | `rpm` | 過去 60 秒內放行的請求數（不論結果） | 精確的事前檢查，不會超過 |
 | `tpm` | 過去 60 秒內**結算**的實際 token（輸入 + 輸出） | 事後累計，與預算相同；超出量在結算時記錄 |
 | `max_output_tokens` | 沒帶 `max_tokens` / `max_completion_tokens` 就補上限；任一個超過就 400 `max_tokens_exceeded` | 超額上界的第二個因子；沒有上限時 Gemini 單次最多 65,536 個輸出 token（L10） |
+| `n` | 必須沒帶或剛好是 1，否則 400 `unsupported_field` | 一筆請求會產生 n 個回應、成本是單次最大值的 n 倍，§8.6 的上界就不成立 |
 | `max_input_chars` | 送給 guardrail 之前，訊息與 tool 參數的文字總長超過就 400 `content_too_large` | 超額上界的第三個因子；M4 的全域上限 100 萬字元太寬 |
 
 - rpm 只計放行的請求，被拒絕的不計，否則持續送請求會一直鎖住自己
@@ -386,6 +387,7 @@ kyt 的設定（`max_concurrent` 4、`max_input_chars` 100,000、`max_output_tok
 | 401 | `invalid_user_token` | token 無法驗證，或不是允許的 client 發的 | |
 | 400 | `end_user_override` | body 的 `user`、`metadata.user_id`、`metadata.user`，或 `x-litellm-customer-id`、`x-litellm-end-user-id` header | `field` |
 | 400 | `max_tokens_exceeded` | `max_tokens` 或 `max_completion_tokens` 超過等級的上限，或不是正整數 | `field` |
+| 400 | `unsupported_field` | 請求的 `n` 不是 1；多個回應會讓單筆成本超過 §8.6 的上界 | `field` |
 | 400 | `content_too_large` | 文字總長超過等級的 `max_input_chars`（沿用 M4 的代碼） | |
 | 403 | `no_llm_quota` | 沒有符合使用者角色的額度等級 | |
 | 403 | `user_budget_exceeded` | 本日或本月已結算的成本達到上限 | `limit: {"type": "budget_day", "resets_at": "…"}` |
@@ -406,7 +408,7 @@ kyt 的設定（`max_concurrent` 4、`max_input_chars` 100,000、`max_output_tok
 | `user_sub`、`username` | 驗證過的使用者；token 無效時為 `null` |
 | `decision`、`reasons` | `deny` 與錯誤代碼 |
 | `policy_version` | 有查到 OPA 時填入 |
-| `details` | `call_id`、`model`、`tier`、`limit`（種類與上限），以及判斷時的用量，例如 `{"settled_usd": "2.004"}` 或 `{"requests": 20}` |
+| `details` | `call_id`、`model`、`tier`、`limit`（種類、恢復時間與設定的上限 `max`，例如 `{"type": "rpm", "retry_after_seconds": 12, "max": 20}`），以及判斷時的用量，例如 `{"settled_usd": "2.004"}` 或 `{"requests": 20}` |
 
 **`llm_limit_exceeded`**：結算時任一項超額大於 0，與帳本同一個交易寫入：
 

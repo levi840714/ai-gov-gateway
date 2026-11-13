@@ -7,7 +7,7 @@ import pytest
 from ai_gov_gateway.engine.audit import first_invalid
 from ai_gov_gateway.engine.ledger import (
     Admission,
-    DuplicateCallId,
+    CallIdInUse,
     LedgerUnavailable,
     SettledRow,
     Settlement,
@@ -189,5 +189,5 @@ async def test_ledger_audit_failure_leaves_row_in_flight():
     with pytest.raises(LedgerUnavailable):
         await ledger.settle(_ledger_settlement("c1", "3", clock()), LEDGER_TZ, _exceeded)
     assert ledger.rows[("owner-a", "c1")].status == "in_flight"
-    with pytest.raises(DuplicateCallId):
+    with pytest.raises(CallIdInUse):
         await ledger.admit(_ledger_admission("c1", clock()), lambda _: None)

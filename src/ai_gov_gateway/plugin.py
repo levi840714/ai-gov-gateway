@@ -149,7 +149,6 @@ class LlmGuardrailHook(CustomGuardrail):
             return data
         if call_type not in CHAT_CALL_TYPES:
             raise _reject(400, "call_type_not_governed")
-        call_id = data.get("litellm_call_id")
         request = llm_request_from_hook(data, user_api_key_dict)
         try:
             check_request(client_body(data), data)
@@ -163,11 +162,10 @@ class LlmGuardrailHook(CustomGuardrail):
             raise _reject(503, "guardrail_unavailable") from None
         _ADMITTED.add(request.owner, request.call_id)
         if admitted.pseudonyms:
-            owner = owner_of(user_api_key_dict)
-            if owner is None or not isinstance(call_id, str) or not call_id:
-                raise _reject(503, "guardrail_unavailable")
+            # admit 已確認 owner 與 call_id 都有效，否則不會放行
+            assert request.owner is not None and request.call_id is not None
             try:
-                _PENDING.remember(owner, call_id, admitted.pseudonyms)
+                _PENDING.remember(request.owner, request.call_id, admitted.pseudonyms)
             except DuplicateCallId:
                 raise _reject(503, "guardrail_unavailable") from None
         data["messages"] = admitted.messages

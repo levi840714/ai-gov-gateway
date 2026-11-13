@@ -20,7 +20,7 @@ class LedgerUnavailable(Exception):
     """帳本無法讀寫；pre-call 一律拒絕（budget_unavailable）。"""
 
 
-class DuplicateCallId(Exception):
+class CallIdInUse(Exception):
     """同一把 key 重複使用 call_id；call_id 可由 client 以 x-litellm-call-id 指定。"""
 
 

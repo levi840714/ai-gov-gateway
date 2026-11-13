@@ -45,6 +45,14 @@ class LimitDenial(BaseModel):
     limit: dict[str, Any]
     details: dict[str, Any]
 
+    def audit_details(self) -> dict[str, Any]:
+        """稽核用：設定的上限（details 的 max）併入 limit，其餘欄位與 limit 並列。"""
+        details = dict(self.details)
+        limit = dict(self.limit)
+        if "max" in details:
+            limit["max"] = details.pop("max")
+        return {"limit": limit, **details}
+
 
 def _local_midnight(day: date, tz: ZoneInfo) -> datetime:
     return datetime.combine(day, time(), tzinfo=tz)
@@ -107,19 +115,19 @@ def check_admission(
     """依序檢查同時進行數、rpm、tpm、日、月；已結算達到上限才拒絕。"""
     if snapshot.in_flight >= limits.max_concurrent:
         return _rate_denial(
-            "concurrency", 1, {"in_flight": snapshot.in_flight, "limit": limits.max_concurrent}
+            "concurrency", 1, {"in_flight": snapshot.in_flight, "max": limits.max_concurrent}
         )
     if snapshot.minute_requests >= limits.rpm:
         return _rate_denial(
             "rpm",
             _retry_after(snapshot.minute_oldest, now),
-            {"requests": snapshot.minute_requests, "limit": limits.rpm},
+            {"requests": snapshot.minute_requests, "max": limits.rpm},
         )
     if snapshot.minute_tokens >= limits.tpm:
         return _rate_denial(
             "tpm",
             _retry_after(snapshot.minute_oldest_settled, now),
-            {"tokens": snapshot.minute_tokens, "limit": limits.tpm},
+            {"tokens": snapshot.minute_tokens, "max": limits.tpm},
         )
     local_today = now.astimezone(tz).date()
     periods: list[tuple[Period, Decimal, date]] = [

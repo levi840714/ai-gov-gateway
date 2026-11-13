@@ -130,12 +130,21 @@ def test_concurrency_limit():
     )
 
 
+def test_concurrency_and_tpm_details_name_the_maximum():
+    denial = check_admission(snapshot(in_flight=4), LIMITS, NOW, TZ)
+    assert denial is not None
+    assert denial.details == {"in_flight": 4, "max": 4}
+    denial = check_admission(snapshot(minute_tokens=150_000), LIMITS, NOW, TZ)
+    assert denial is not None
+    assert denial.details == {"tokens": 150_000, "max": 150_000}
+
+
 def test_rpm_limit_returns_retry_after():
     oldest = NOW - timedelta(seconds=48)
     denial = check_admission(snapshot(minute_requests=20, minute_oldest=oldest), LIMITS, NOW, TZ)
     assert denial is not None
     assert denial.limit == {"type": "rpm", "retry_after_seconds": 12}
-    assert denial.details == {"requests": 20, "limit": 20}
+    assert denial.details == {"requests": 20, "max": 20}
 
 
 def test_retry_after_is_at_least_one_second():

@@ -14,7 +14,7 @@ from ai_gov_gateway.engine.guardrails.models import GuardrailConfig, PiiSpan
 from ai_gov_gateway.engine.ledger import (
     Admission,
     AuditBuilder,
-    DuplicateCallId,
+    CallIdInUse,
     LedgerUnavailable,
     SettledRow,
     Settlement,
@@ -208,7 +208,7 @@ class InMemoryLedger:
                 return denial
             key = (admission.owner, admission.call_id)
             if key in self.rows:
-                raise DuplicateCallId(admission.call_id)
+                raise CallIdInUse(admission.call_id)
             self.rows[key] = UsageRow(admission=admission.model_copy(deep=True))
             return None
 

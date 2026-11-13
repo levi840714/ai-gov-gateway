@@ -15,7 +15,7 @@ from ai_gov_gateway.engine.audit import GENESIS_HASH, build_record
 from ai_gov_gateway.engine.ledger import (
     Admission,
     AuditBuilder,
-    DuplicateCallId,
+    CallIdInUse,
     LedgerUnavailable,
     SettledRow,
     Settlement,
@@ -247,7 +247,7 @@ async def _lock_user(conn: psycopg.AsyncConnection[DictRow], agent_id: str, user
 
 @asynccontextmanager
 async def _ledger_errors() -> AsyncIterator[None]:
-    # 帳本的呼叫端只認 LedgerUnavailable；DuplicateCallId 不是資料庫錯誤，照原樣往外傳
+    # 帳本的呼叫端只認 LedgerUnavailable；CallIdInUse 不是資料庫錯誤，照原樣往外傳
     try:
         yield
     except (StoreUnavailable, StoreError, psycopg.Error) as error:
@@ -471,7 +471,7 @@ class PostgresStore:
             try:
                 await conn.execute(query, params)
             except psycopg.errors.UniqueViolation as error:
-                raise DuplicateCallId(admission.call_id) from error
+                raise CallIdInUse(admission.call_id) from error
         return None
 
     async def settle(
