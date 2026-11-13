@@ -140,6 +140,7 @@ def _ledger_admission(call_id: str, now: datetime) -> Admission:
         owner="owner-a",
         call_id=call_id,
         agent_id="kyt-agent",
+        key_alias="kyt-agent@1.6",
         user_sub="alice-sub",
         model="gemini",
         limits=UsageLimits.model_validate(GUARDRAIL_CONFIG["limits"]),
@@ -162,7 +163,9 @@ def _ledger_settlement(call_id: str, cost: str, at: datetime) -> Settlement:
 
 
 def _exceeded(row: SettledRow, overage: Overage, settlement: Settlement) -> AuditEvent:
-    return AuditEvent(event_type="llm_limit_exceeded", reasons=overage.exceeded)
+    return AuditEvent(
+        event_type="llm_limit_exceeded", key_alias=row.key_alias, reasons=overage.exceeded
+    )
 
 
 async def test_ledger_settles_overage_into_store_audit():
@@ -174,7 +177,7 @@ async def test_ledger_settles_overage_into_store_audit():
             _ledger_settlement(call_id, cost, clock()), LEDGER_TZ, _exceeded
         )
     assert overage is not None and overage.day == Decimal("0.02")
-    assert [r.reasons for r in store.audit] == [["budget_day"]]
+    assert [(r.key_alias, r.reasons) for r in store.audit] == [("kyt-agent@1.6", ["budget_day"])]
     assert await ledger.settle(_ledger_settlement("c2", "1", clock()), LEDGER_TZ, _exceeded) is None
 
 

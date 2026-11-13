@@ -247,6 +247,7 @@ class InMemoryLedger:
                 admission = row.admission
                 settled = SettledRow(
                     agent_id=admission.agent_id,
+                    key_alias=admission.key_alias,
                     user_sub=admission.user_sub,
                     model=admission.model,
                     tier=admission.limits.tier,

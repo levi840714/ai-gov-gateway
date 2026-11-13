@@ -28,6 +28,7 @@ class Admission(BaseModel):
     owner: str
     call_id: str
     agent_id: str
+    key_alias: str
     user_sub: str
     model: str
     limits: UsageLimits
@@ -50,6 +51,7 @@ class SettledRow(BaseModel):
     """結算後的帳本列；給稽核事件使用。"""
 
     agent_id: str
+    key_alias: str
     user_sub: str
     model: str
     tier: str

@@ -75,6 +75,7 @@ def _admission(
         owner=owner,
         call_id=call_id,
         agent_id="kyt-agent",
+        key_alias="kyt-agent@1.6",
         user_sub=user_sub,
         model="gemini",
         limits=limits,
@@ -111,6 +112,7 @@ def _audit(row: SettledRow, overage: Overage, settlement: Settlement) -> AuditEv
     return AuditEvent(
         event_type="llm_limit_exceeded",
         agent_id=row.agent_id,
+        key_alias=row.key_alias,
         user_sub=row.user_sub,
         decision="over_limit",
         reasons=overage.exceeded,
@@ -167,10 +169,11 @@ async def _row(call_id: str, owner: str = "owner-a") -> dict[str, Any] | None:
 async def test_admit_inserts_in_flight(store):
     assert await store.admit(_admission("c1"), _allow) is None
     row = await _row("c1")
-    assert (row["status"], row["tier"], row["agent_id"], row["user_sub"]) == (
+    assert (row["status"], row["tier"], row["agent_id"], row["key_alias"], row["user_sub"]) == (
         "in_flight",
         "default",
         "kyt-agent",
+        "kyt-agent@1.6",
         "alice-sub",
     )
     assert UsageLimits.model_validate(row["limits"]) == LIMITS
@@ -272,7 +275,9 @@ async def test_settle_crossing_writes_audit(store):
     records = await store.audit_records()
     assert overage is not None and overage.day == Decimal("0.02")
     assert row["over_day_usd"] == Decimal("0.02")
-    assert [r.event_type for r in records] == ["llm_limit_exceeded"]
+    assert [(r.event_type, r.key_alias) for r in records] == [
+        ("llm_limit_exceeded", "kyt-agent@1.6")
+    ]
     assert records[0].reasons == ["budget_day"]
     assert records[0].details["crossed"]["budget_day"] is True
     assert records[0].details["over"]["budget_day"]["over"] == "0.02"

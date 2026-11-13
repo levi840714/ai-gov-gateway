@@ -107,6 +107,7 @@ CREATE TABLE IF NOT EXISTS llm_usage (
     owner text NOT NULL,
     call_id text NOT NULL,
     agent_id text NOT NULL,
+    key_alias text NOT NULL,
     user_sub text NOT NULL,
     model text NOT NULL,
     tier text NOT NULL,
@@ -271,7 +272,8 @@ async def _settle_context(
         },
     )
     before = await cursor.fetchone()
-    assert before is not None  # 聚合查詢一定回傳一列
+    if before is None:
+        raise StoreError("settled usage query returned no row")
     return SettleContext(
         limits=UsageLimits.model_validate(row["limits"]),
         cost=settlement.cost_usd,
@@ -457,6 +459,7 @@ class PostgresStore:
                     "owner": admission.owner,
                     "call_id": admission.call_id,
                     "agent_id": admission.agent_id,
+                    "key_alias": admission.key_alias,
                     "user_sub": admission.user_sub,
                     "model": admission.model,
                     "tier": admission.limits.tier,
