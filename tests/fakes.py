@@ -146,6 +146,15 @@ GUARDRAIL_CONFIG: dict[str, Any] = {
     "pii": {"entities": ["EMAIL"], "exclude": ["eth_address"]},
     "injection": {"action": "redact", "system_notice": False},
     "high_risk_tools": ["file_str"],
+    "limits": {
+        "tier": "default",
+        "budget_usd": {"day": "2.0", "month": "20.0"},
+        "rpm": 20,
+        "tpm": 150000,
+        "max_concurrent": 4,
+        "max_input_chars": 100000,
+        "max_output_tokens": 4096,
+    },
     "policy_version": "test-1",
 }
 
@@ -165,9 +174,13 @@ class FakeGuardrailPolicy:
         self.config = config or guardrail_config()
         self.error: str | None = None
         self.agents: list[AgentRef] = []
+        self.user: UserIdentity | None = None
 
-    async def llm_config(self, agent: AgentRef) -> GuardrailConfig:
+    async def llm_config(
+        self, agent: AgentRef, user: UserIdentity | None = None
+    ) -> GuardrailConfig:
         self.agents.append(agent)
+        self.user = user
         if self.error is not None:
             raise PolicyError(self.error)
         return self.config

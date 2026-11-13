@@ -10,6 +10,11 @@
       },
       "injection": {"action": "redact", "system_notice": false}
     },
+    "llm_limits": [
+      {"tier": "quota_probe", "role": "llm_quota_probe", "budget_usd": {"day": 0.002, "month": 0.01}, "rpm": 5, "tpm": 5000, "max_concurrent": 3, "max_input_chars": 20000, "max_output_tokens": 64},
+      {"tier": "supervisor", "role": "compliance_supervisor", "budget_usd": {"day": 5.0, "month": 50.0}, "rpm": 30, "tpm": 150000, "max_concurrent": 4, "max_input_chars": 100000, "max_output_tokens": 4096},
+      {"tier": "default", "role": "*", "budget_usd": {"day": 2.0, "month": 20.0}, "rpm": 20, "tpm": 150000, "max_concurrent": 4, "max_input_chars": 100000, "max_output_tokens": 4096}
+    ],
     "versions": {
       "1.4": {"key_alias": "kyt-agent@1.4", "approved_by": "governance-team", "approved_at": "2026-10-20"},
       "1.5": {"key_alias": "kyt-agent@1.5", "approved_by": "governance-team", "approved_at": "2026-10-21"}

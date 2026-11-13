@@ -2,6 +2,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from ai_gov_gateway.engine.limits import UsageLimits
+
 InjectionAction = Literal["redact", "deny", "flag"]
 AgentStatus = Literal["active", "suspended", "unregistered"]
 PiiEntity = Literal["TW_ID", "TW_ARC", "PHONE", "EMAIL", "CREDIT_CARD", "BANK_ACCOUNT", "API_KEY"]
@@ -25,6 +27,7 @@ class GuardrailConfig(BaseModel):
     pii: PiiSettings
     injection: InjectionSettings
     high_risk_tools: list[str] = Field(default_factory=list)
+    limits: UsageLimits | None
     policy_version: str
 
 

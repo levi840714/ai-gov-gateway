@@ -99,3 +99,101 @@ test_invalid_guardrail_data_is_detected if {
 	}}}
 	count(invalid_guardrail_agents) == 1 with data.agents as bad
 }
+
+tier(name, role) := {
+	"tier": name,
+	"role": role,
+	"budget_usd": {"day": 1, "month": 10},
+	"rpm": 10,
+	"tpm": 1000,
+	"max_concurrent": 2,
+	"max_input_chars": 1000,
+	"max_output_tokens": 100,
+}
+
+limits_x(tiers) := registered_x({"status": "active", "llm_limits": tiers})
+
+carol := {"roles": ["analyst", "compliance_supervisor"]}
+
+alice := {"roles": ["analyst"]}
+
+three_tiers := [tier("probe", "nobody"), tier("supervisor", "compliance_supervisor"), tier("default", "*")]
+
+test_limits_first_matching_tier if {
+	result := governance.llm with input as {"agent": x_v10, "user": carol} with data.agents as limits_x(three_tiers)
+	result.limits.tier == "supervisor"
+}
+
+test_limits_wildcard_tier if {
+	result := governance.llm with input as {"agent": x_v10, "user": alice} with data.agents as limits_x(three_tiers)
+	result.limits.tier == "default"
+}
+
+test_limits_null_without_matching_tier if {
+	agents := limits_x([tier("supervisor", "compliance_supervisor")])
+	result := governance.llm with input as {"agent": x_v10, "user": alice} with data.agents as agents
+	result.limits == null
+}
+
+test_limits_strict_default_when_unconfigured if {
+	result := governance.llm with input as {"agent": x_v10, "user": alice} with data.agents as registered_x({"status": "active"})
+	result.limits == governance.strict_limits
+	result.limits.tier == "strict"
+}
+
+test_unregistered_agent_still_has_llm_with_strict_limits if {
+	result := governance.llm with input as {"agent": {"id": "nobody", "version": "1.0", "key_alias": "nobody@1.0"}}
+	result.agent_status == "unregistered"
+	result.limits.tier == "strict"
+}
+
+test_llm_undefined_when_tier_invalid if {
+	base := tier("t", "*")
+	bad_tiers := [
+		object.remove(base, ["max_concurrent"]),
+		object.union(base, {"budget_usd": 5}),
+		json.patch(base, [{"op": "replace", "path": "/budget_usd", "value": {}}]),
+		json.patch(base, [{"op": "replace", "path": "/budget_usd", "value": {"week": 1}}]),
+		object.union(base, {"budget_usd": {"day": 1, "week": 1}}),
+		object.union(base, {"budget_usd": {"day": -1}}),
+		object.union(base, {"rpm": -1}),
+		object.union(base, {"rpm": 1.5}),
+		object.union(base, {"tpm": "10"}),
+		"default",
+	]
+	every bad in bad_tiers {
+		not governance.llm with input as {"agent": x_v10, "user": alice} with data.agents as limits_x([bad])
+	}
+}
+
+test_llm_undefined_when_one_of_many_tiers_invalid if {
+	tiers := [tier("ok", "*"), object.union(tier("bad", "x"), {"rpm": 0})]
+	not governance.llm with input as {"agent": x_v10, "user": alice} with data.agents as limits_x(tiers)
+}
+
+test_llm_undefined_when_limits_not_array if {
+	not governance.llm with input as {"agent": x_v10, "user": alice} with data.agents as limits_x(tier("t", "*"))
+}
+
+test_roles_not_array_matches_only_wildcard if {
+	bad_roles := {"roles": "compliance_supervisor"}
+	result := governance.llm with input as {"agent": x_v10, "user": bad_roles} with data.agents as limits_x(three_tiers)
+	result.limits.tier == "default"
+	no_wildcard := limits_x([tier("supervisor", "compliance_supervisor")])
+	none := governance.llm with input as {"agent": x_v10, "user": bad_roles} with data.agents as no_wildcard
+	none.limits == null
+}
+
+test_missing_user_matches_only_wildcard if {
+	result := governance.llm with input as {"agent": x_v10} with data.agents as limits_x(three_tiers)
+	result.limits.tier == "default"
+}
+
+test_kyt_agent_limit_tiers if {
+	supervisor := governance.llm with input as {"agent": kyt_v15, "user": carol}
+	supervisor.limits.tier == "supervisor"
+	probe := governance.llm with input as {"agent": kyt_v15, "user": {"roles": ["llm_quota_probe"]}}
+	probe.limits.tier == "quota_probe"
+	fallback := governance.llm with input as {"agent": kyt_v15, "user": alice}
+	fallback.limits.tier == "default"
+}
