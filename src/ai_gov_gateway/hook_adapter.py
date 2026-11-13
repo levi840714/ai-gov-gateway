@@ -1,11 +1,17 @@
 import logging
+import math
 import time
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Callable, Iterable, Mapping
+from datetime import datetime
+from decimal import Decimal
 from typing import Any
 
 from ai_gov_gateway.engine.fingerprint import sha256_hex
+from ai_gov_gateway.engine.guardrails.fields import end_user_field
 from ai_gov_gateway.engine.guardrails.pii import PseudonymMap, StreamTextRestorer
+from ai_gov_gateway.engine.ledger import Settlement
+from ai_gov_gateway.engine.llm_gate import LlmRequest
 from ai_gov_gateway.engine.models import ToolCall
 
 logger = logging.getLogger(__name__)
@@ -75,6 +81,63 @@ def owner_of(user_api_key_dict: Any) -> str | None:
         if isinstance(value, str) and value:
             return sha256_hex(value)
     return None
+
+
+def llm_request_from_hook(data: Mapping[str, Any], user_api_key_dict: Any) -> LlmRequest:
+    """LiteLLM v1.105.1 acompletion 的 pre-call data；檢查與拒絕都交給 LlmGate。"""
+    model, call_id = data.get("model"), data.get("litellm_call_id")
+    return LlmRequest(
+        key_alias=getattr(user_api_key_dict, "key_alias", None),
+        owner=owner_of(user_api_key_dict),
+        user_token=user_token_from_hook(data),
+        end_user_override=end_user_header(data) or end_user_field(client_body(data)),
+        model=model if isinstance(model, str) else None,
+        call_id=call_id if isinstance(call_id, str) else None,
+        messages=data.get("messages") or [],
+        max_tokens=data.get("max_tokens"),
+        max_completion_tokens=data.get("max_completion_tokens"),
+    )
+
+
+def settlement_from_log(kwargs: Mapping[str, Any], *, at: datetime) -> Settlement | None:
+    """success logging 事件的實際用量（M5 spike B3）；欄位缺漏或型別不符時回傳 None。"""
+    # standard_logging_object 的 id 不是 call_id，要用 kwargs 的 litellm_call_id
+    call_id = kwargs.get("litellm_call_id")
+    log = kwargs.get("standard_logging_object")
+    if not isinstance(call_id, str) or not call_id or not isinstance(log, Mapping):
+        return None
+    metadata = log.get("metadata")
+    key_hash = metadata.get("user_api_key_hash") if isinstance(metadata, Mapping) else None
+    cost = _amount(log.get("response_cost"))
+    prompt, completion = _count(log.get("prompt_tokens")), _count(log.get("completion_tokens"))
+    if not isinstance(key_hash, str) or not key_hash:
+        return None
+    if cost is None or prompt is None or completion is None:
+        return None
+    return Settlement(
+        owner=sha256_hex(key_hash),
+        call_id=call_id,
+        cost_usd=cost,
+        prompt_tokens=prompt,
+        completion_tokens=completion,
+        at=at,
+        settled_by="callback",
+    )
+
+
+def _count(value: object) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
+def _amount(value: object) -> Decimal | None:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    if not math.isfinite(value) or value < 0:
+        return None
+    # 成本是有二進位誤差的 float；先四捨五入，帳本才會與 SpendLogs.spend 相同
+    return Decimal(str(round(value, 12)))
 
 
 class DuplicateCallId(Exception):

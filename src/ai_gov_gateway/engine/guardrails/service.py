@@ -21,7 +21,7 @@ from ai_gov_gateway.engine.guardrails.models import (
     InjectionFinding,
 )
 from ai_gov_gateway.engine.guardrails.pii import PiiDetector, Pseudonymizer, PseudonymMap
-from ai_gov_gateway.engine.models import AgentRef, AuditEvent
+from ai_gov_gateway.engine.models import AgentRef, AuditEvent, UserIdentity
 from ai_gov_gateway.engine.policy import PolicyError
 from ai_gov_gateway.engine.store import GovernanceStore, StoreError, StoreUnavailable
 
@@ -32,10 +32,11 @@ SCREENED_ROLES = ("tool", "function")
 _UNSAFE_NAME = re.compile(r"[^A-Za-z0-9_.-]")
 Message = dict[str, Any]
 T = TypeVar("T")
+INACTIVE_CODES = {"unregistered": "unregistered_agent_version", "suspended": "agent_suspended"}
 
 
 class GuardrailPolicy(Protocol):
-    async def llm_config(self, agent: AgentRef) -> GuardrailConfig: ...
+    async def llm_config(self, agent: AgentRef, user: UserIdentity) -> GuardrailConfig: ...
 
 
 @dataclass
@@ -64,24 +65,33 @@ class LlmGuardrail:
         self._max_total_chars = max_total_chars
         self._clock = clock
 
+    async def resolve(
+        self, key_alias: str | None, user: UserIdentity, *, model: str | None, call_id: str | None
+    ) -> tuple[AgentRef, GuardrailConfig]:
+        """名稱不符、未註冊、停用時寫 llm_access 稽核後丟 403；OPA 錯誤丟 503。"""
+        # 與 tool 呼叫共用同一把 `<agent>@<版本>` key，名稱格式不符就不可能已註冊
+        agent = parse_agent_key(key_alias)
+        denial = _Access(key_alias, agent, user, model, call_id)
+        if agent is None:
+            await self._write(denial.event("unregistered_agent_version"))
+            raise GuardrailError(403, "unregistered_agent_version")
+        config = await self._config(agent, user)
+        code = INACTIVE_CODES.get(config.agent_status)
+        if code is not None:
+            await self._write(denial.event(code, config.policy_version))
+            raise GuardrailError(403, code)
+        return agent, config
+
     async def guard_request(
         self,
         *,
-        key_alias: str | None,
+        agent: AgentRef,
+        config: GuardrailConfig,
         model: str | None,
         call_id: str | None,
         messages: list[Message],
     ) -> GuardedRequest:
-        """一律 fail-closed：設定、偵測或稽核任一步失敗都拒絕請求。"""
-        # 與 tool 呼叫共用同一把 `<agent>@<版本>` key，名稱格式不符就不可能已註冊
-        agent = parse_agent_key(key_alias)
-        if agent is None:
-            raise GuardrailError(403, "unregistered_agent_version")
-        config = await self._config(agent)
-        if config.agent_status == "unregistered":
-            raise GuardrailError(403, "unregistered_agent_version")
-        if config.agent_status == "suspended":
-            raise GuardrailError(403, "agent_suspended")
+        """一律 fail-closed：偵測或稽核任一步失敗都拒絕請求。"""
         if not isinstance(messages, list) or not all(isinstance(m, dict) for m in messages):
             raise GuardrailError(400, "invalid_messages")
         self._check_size(messages)
@@ -89,7 +99,9 @@ class LlmGuardrail:
         labels = _tool_labels(messages)
         findings = await self._offload(self._screen_tools, messages, labels, config)
         injected = sorted({f.rule for f in findings if f.rule != HIDDEN_RULE})
-        audit = _Audit(agent.id, key_alias, model, call_id, findings, config, self._rules.version)
+        audit = _Audit(
+            agent.id, agent.key_alias, model, call_id, findings, config, self._rules.version
+        )
         if injected and config.injection.action == "deny":
             await self._write(audit.event("deny", PseudonymMap()))
             raise GuardrailError(400, "prompt_injection_detected", rules=injected)
@@ -102,9 +114,9 @@ class LlmGuardrail:
             await self._write(audit.event(decision, pseudonyms))
         return GuardedRequest(messages=messages, pseudonyms=pseudonyms)
 
-    async def _config(self, agent: AgentRef) -> GuardrailConfig:
+    async def _config(self, agent: AgentRef, user: UserIdentity) -> GuardrailConfig:
         try:
-            return await self._policy.llm_config(agent)
+            return await self._policy.llm_config(agent, user)
         except PolicyError as error:
             code = "policy_unavailable" if error.code == "policy_unavailable" else "policy_error"
             raise GuardrailError(503, code) from error
@@ -186,6 +198,49 @@ class LlmGuardrail:
             await self._store.append_audit(event, self._clock())
         except (StoreUnavailable, StoreError) as error:
             raise GuardrailError(503, "audit_write_failed") from error
+
+
+def access_event(
+    *,
+    key_alias: str | None,
+    agent: AgentRef | None,
+    user: UserIdentity | None,
+    code: str,
+    policy_version: str | None,
+    details: dict[str, Any],
+) -> AuditEvent:
+    """LLM 路徑拒絕存取的稽核（spec §10.2）；只記代碼與用量，不記 token 與訊息內容。"""
+    return AuditEvent(
+        event_type="llm_access",
+        agent_id=agent.id if agent else None,
+        agent_version=agent.version if agent else None,
+        key_alias=key_alias,
+        user_sub=user.sub if user else None,
+        username=user.username if user else None,
+        decision="deny",
+        reasons=[code],
+        policy_version=policy_version,
+        details=details,
+    )
+
+
+@dataclass(frozen=True)
+class _Access:
+    key_alias: str | None
+    agent: AgentRef | None
+    user: UserIdentity
+    model: str | None
+    call_id: str | None
+
+    def event(self, code: str, policy_version: str | None = None) -> AuditEvent:
+        return access_event(
+            key_alias=self.key_alias,
+            agent=self.agent,
+            user=self.user,
+            code=code,
+            policy_version=policy_version,
+            details={"call_id": self.call_id, "model": self.model},
+        )
 
 
 @dataclass(frozen=True)

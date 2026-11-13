@@ -54,3 +54,32 @@ def test_guardrail_settings_defaults(monkeypatch):
     assert settings.guardrail_max_chars == 200_000
     assert settings.guardrail_max_total_chars == 1_000_000
     assert settings.guardrail_rules_path.endswith("guardrails/injection_rules.json")
+
+
+def test_usage_settings_defaults(monkeypatch):
+    for key in [k for k in os.environ if k.startswith("GOV_")]:
+        monkeypatch.delenv(key)
+    settings = Settings()
+    assert settings.budget_timezone == "Asia/Taipei"
+    assert settings.usage_inflight_ttl_seconds == 300
+
+
+def test_reads_usage_settings(monkeypatch):
+    monkeypatch.setenv("GOV_BUDGET_TIMEZONE", "UTC")
+    monkeypatch.setenv("GOV_USAGE_INFLIGHT_TTL_SECONDS", "120")
+    settings = Settings()
+    assert (settings.budget_timezone, settings.usage_inflight_ttl_seconds) == ("UTC", 120)
+
+
+@pytest.mark.parametrize("zone", ["Mars/Olympus", "", "../etc/passwd"])
+def test_rejects_unknown_budget_timezone(monkeypatch, zone):
+    monkeypatch.setenv("GOV_BUDGET_TIMEZONE", zone)
+    with pytest.raises(ValidationError):
+        Settings()
+
+
+@pytest.mark.parametrize("ttl", ["0", "-1"])
+def test_rejects_non_positive_inflight_ttl(monkeypatch, ttl):
+    monkeypatch.setenv("GOV_USAGE_INFLIGHT_TTL_SECONDS", ttl)
+    with pytest.raises(ValidationError):
+        Settings()

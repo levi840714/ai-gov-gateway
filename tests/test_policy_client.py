@@ -94,7 +94,7 @@ LLM_RESULT = {
 CAROL = UserIdentity(sub="u-1", username="carol", roles=["compliance_supervisor"])
 
 
-async def test_llm_config_posts_agent_without_user_when_not_given():
+async def test_llm_config_always_sends_agent_and_user():
     seen = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -102,27 +102,18 @@ async def test_llm_config_posts_agent_without_user_when_not_given():
         seen["body"] = json.loads(request.content)
         return httpx.Response(200, json={"result": LLM_RESULT})
 
-    config = await _client(handler).llm_config(KYT_V15)
+    config = await _client(handler).llm_config(KYT_V15, CAROL)
     assert seen == {
         "path": "/v1/data/governance/llm",
         "body": {
-            "input": {"agent": {"id": "kyt-agent", "version": "1.5", "key_alias": "kyt-agent@1.5"}}
+            "input": {
+                "agent": {"id": "kyt-agent", "version": "1.5", "key_alias": "kyt-agent@1.5"},
+                "user": CAROL.model_dump(),
+            }
         },
     }
-    assert "user" not in seen["body"]["input"]
     assert config.injection.action == "redact"
     assert config.pii.exclude == ["eth_address"]
-
-
-async def test_llm_config_sends_user_and_parses_limits():
-    seen = {}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        seen["body"] = json.loads(request.content)
-        return httpx.Response(200, json={"result": LLM_RESULT})
-
-    config = await _client(handler).llm_config(KYT_V15, CAROL)
-    assert seen["body"]["input"]["user"] == CAROL.model_dump()
     assert config.limits is not None
     assert config.limits.tier == "default"
     assert config.limits.budget_usd == {"day": Decimal("2.0"), "month": Decimal("20.0")}
@@ -153,7 +144,7 @@ async def test_llm_config_null_limits_is_allowed():
 async def test_llm_config_rejects_missing_or_unsupported_result(result):
     client = _client(lambda request: httpx.Response(200, json={"result": result} if result else {}))
     with pytest.raises(PolicyError) as error:
-        await client.llm_config(KYT_V15)
+        await client.llm_config(KYT_V15, CAROL)
     assert error.value.code == "policy_error"
 
 
@@ -162,5 +153,5 @@ async def test_llm_config_reports_unavailable_opa():
         raise httpx.ConnectError("down")
 
     with pytest.raises(PolicyError) as error:
-        await _client(handler).llm_config(KYT_V15)
+        await _client(handler).llm_config(KYT_V15, CAROL)
     assert error.value.code == "policy_unavailable"

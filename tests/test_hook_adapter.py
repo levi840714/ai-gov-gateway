@@ -1,9 +1,14 @@
 import json
+from datetime import UTC, datetime
+from decimal import Decimal
 from types import SimpleNamespace as NS
 
 import pytest
 
+from ai_gov_gateway.engine.fingerprint import sha256_hex
 from ai_gov_gateway.engine.guardrails.pii import PseudonymMap
+from ai_gov_gateway.engine.ledger import Settlement
+from ai_gov_gateway.engine.llm_gate import LlmRequest
 from ai_gov_gateway.hook_adapter import (
     DuplicateCallId,
     PendingPseudonyms,
@@ -12,9 +17,11 @@ from ai_gov_gateway.hook_adapter import (
     client_body,
     end_user_header,
     has_ambiguous_authorization,
+    llm_request_from_hook,
     owner_of,
     restore_response,
     restore_stream,
+    settlement_from_log,
     tool_call_from_hook,
     user_token_from_hook,
 )
@@ -332,3 +339,102 @@ def test_end_user_header_detected(name):
 
 def test_no_end_user_header():
     assert end_user_header(_data(authorization="Bearer t")) is None
+
+
+def _chat_data(**extra) -> dict:
+    return {
+        **_data(authorization="Bearer eyJ.a.b"),
+        "model": "probe-primary",
+        "litellm_call_id": "c1",
+        "messages": [{"role": "user", "content": "hi"}],
+        "proxy_server_request": {"body": {"model": "probe-primary"}},
+        **extra,
+    }
+
+
+def test_llm_request_from_hook():
+    key = NS(key_alias="kyt-agent@1.6", token="hashed-key")
+    request = llm_request_from_hook(_chat_data(max_tokens=17), key)
+    assert request == LlmRequest(
+        key_alias="kyt-agent@1.6",
+        owner=owner_of(key),
+        user_token="eyJ.a.b",
+        end_user_override=None,
+        model="probe-primary",
+        call_id="c1",
+        messages=[{"role": "user", "content": "hi"}],
+        max_tokens=17,
+        max_completion_tokens=None,
+    )
+    assert "eyJ" not in repr(request)
+
+
+@pytest.mark.parametrize(
+    ("extra", "expected"),
+    [
+        ({"proxy_server_request": {"body": {"user": "x"}}}, "user"),
+        ({"proxy_server_request": {"body": {"metadata": {"user_id": "x"}}}}, "metadata.user_id"),
+        (_data(**{"x-litellm-customer-id": "x"}), "x-litellm-customer-id"),
+    ],
+)
+def test_llm_request_reports_end_user_override(extra, expected):
+    request = llm_request_from_hook(_chat_data(**extra), NS(key_alias=None, token=None))
+    assert request.end_user_override == expected
+
+
+NOW = datetime(2026, 11, 13, 9, tzinfo=UTC)
+
+
+def _success_kwargs(**log) -> dict:
+    standard = {
+        "id": "not-the-call-id",
+        "response_cost": 0.0123,
+        "prompt_tokens": 400,
+        "completion_tokens": 56,
+        "metadata": {"user_api_key_hash": "hashed-key"},
+        **log,
+    }
+    return {"litellm_call_id": "c1", "standard_logging_object": standard}
+
+
+def test_settlement_from_success_kwargs():
+    assert settlement_from_log(_success_kwargs(), at=NOW) == Settlement(
+        owner=sha256_hex("hashed-key"),
+        call_id="c1",
+        cost_usd=Decimal("0.0123"),
+        prompt_tokens=400,
+        completion_tokens=56,
+        at=NOW,
+        settled_by="callback",
+    )
+
+
+def test_settlement_owner_matches_owner_of():
+    settlement = settlement_from_log(_success_kwargs(), at=NOW)
+    assert settlement.owner == owner_of(NS(token="hashed-key"))
+
+
+def test_settlement_cost_drops_float_error():
+    settlement = settlement_from_log(_success_kwargs(response_cost=0.00012200000000000001), at=NOW)
+    assert settlement.cost_usd == Decimal("0.000122")
+    assert str(settlement.cost_usd) == "0.000122"
+
+
+@pytest.mark.parametrize(
+    "broken",
+    [
+        {},
+        {"litellm_call_id": "c1"},
+        {"litellm_call_id": "c1", "standard_logging_object": {"response_cost": "x"}},
+        {**_success_kwargs(), "litellm_call_id": ""},
+        _success_kwargs(response_cost=None),
+        _success_kwargs(response_cost=True),
+        _success_kwargs(response_cost=float("nan")),
+        _success_kwargs(response_cost=-0.1),
+        _success_kwargs(prompt_tokens=None),
+        _success_kwargs(completion_tokens=1.5),
+        _success_kwargs(metadata={}),
+    ],
+)
+def test_settlement_missing_fields_returns_none(broken):
+    assert settlement_from_log(broken, at=NOW) is None

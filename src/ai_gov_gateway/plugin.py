@@ -7,6 +7,8 @@ import logging
 from collections.abc import AsyncIterator
 from typing import Any
 
+import litellm
+import litellm.proxy.proxy_server as proxy_server
 from fastapi import HTTPException
 from litellm.integrations.custom_guardrail import CustomGuardrail
 from litellm.proxy.proxy_server import app
@@ -14,10 +16,12 @@ from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from ai_gov_gateway.api.approvals import router
+from ai_gov_gateway.engine.clock import utc_now
 from ai_gov_gateway.engine.guardrails.fields import check_request
 from ai_gov_gateway.engine.guardrails.models import GuardrailError
 from ai_gov_gateway.engine.guardrails.pii import PseudonymMap
 from ai_gov_gateway.engine.models import Outcome
+from ai_gov_gateway.engine.pricing import priced_aliases
 from ai_gov_gateway.engine.store import StoreUnavailable
 from ai_gov_gateway.hook_adapter import (
     DuplicateCallId,
@@ -26,12 +30,14 @@ from ai_gov_gateway.hook_adapter import (
     RestoreError,
     client_body,
     has_ambiguous_authorization,
+    llm_request_from_hook,
     owner_of,
     restore_response,
     restore_stream,
+    settlement_from_log,
     tool_call_from_hook,
 )
-from ai_gov_gateway.runtime import get_services
+from ai_gov_gateway.runtime import get_services, use_pricing
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +73,26 @@ if not getattr(app.state, "governance_routes", False):
     app.include_router(router)
     _install_header_guard()
     app.state.governance_routes = True
+
+
+class _RouterPricing:
+    """router 在 guardrail 載入時可能還沒建好：第一次成功後快取，失敗時下次重試。"""
+
+    def __init__(self) -> None:
+        self._aliases: frozenset[str] | None = None
+
+    def __call__(self) -> frozenset[str]:
+        if self._aliases is None:
+            router = proxy_server.llm_router
+            if router is None:
+                raise RuntimeError("llm_router not ready")
+            # 主機上的 mypy 把 repo 的 litellm/ 設定目錄當成 namespace package，找不到 model_cost
+            model_cost = litellm.model_cost  # type: ignore[attr-defined]
+            self._aliases = priced_aliases(router.model_list, router.fallbacks or [], model_cost)
+        return self._aliases
+
+
+use_pricing(_RouterPricing())
 
 
 class GovernanceBlocked(ValueError):
@@ -124,29 +150,40 @@ class LlmGuardrailHook(CustomGuardrail):
         call_id = data.get("litellm_call_id")
         try:
             check_request(client_body(data), data)
-            guardrail = (await get_services()).llm_guardrail
-            guarded = await guardrail.guard_request(
-                key_alias=getattr(user_api_key_dict, "key_alias", None),
-                model=data.get("model"),
-                call_id=call_id,
-                messages=data.get("messages") or [],
-            )
+            gate = (await get_services()).llm_gate
+            admitted = await gate.admit(llm_request_from_hook(data, user_api_key_dict))
         except GuardrailError as error:
             raise HTTPException(status_code=error.status, detail=error.body()) from None
         except Exception as error:
             # 只記錄例外類別：訊息可能含使用者內容
             logger.error("llm guardrail failed: %s", type(error).__name__)
             raise _reject(503, "guardrail_unavailable") from None
-        if guarded.pseudonyms:
+        if admitted.pseudonyms:
             owner = owner_of(user_api_key_dict)
             if owner is None or not isinstance(call_id, str) or not call_id:
                 raise _reject(503, "guardrail_unavailable")
             try:
-                _PENDING.remember(owner, call_id, guarded.pseudonyms)
+                _PENDING.remember(owner, call_id, admitted.pseudonyms)
             except DuplicateCallId:
                 raise _reject(503, "guardrail_unavailable") from None
-        data["messages"] = guarded.messages
+        data["messages"] = admitted.messages
+        # M5 spike B10：改寫的 max_tokens 會送到 provider，fallback 也沿用
+        if admitted.max_tokens is not None:
+            data["max_tokens"] = admitted.max_tokens
         return data
+
+    async def async_log_success_event(
+        self, kwargs: dict[str, Any], response_obj: Any, start_time: Any, end_time: Any
+    ) -> None:
+        # M5 spike B3：streaming 結束與 fallback 成功時各一次；成本以 LiteLLM 的計費為準
+        settlement = settlement_from_log(kwargs, at=utc_now())
+        if settlement is None:
+            logger.error("llm usage settlement skipped: missing fields")
+            return
+        try:
+            await (await get_services()).llm_gate.settle(settlement)
+        except Exception as error:
+            logger.error("llm usage settlement failed: %s", type(error).__name__)
 
     async def async_post_call_success_hook(
         self, data: dict[str, Any], user_api_key_dict: Any, response: Any
@@ -168,8 +205,13 @@ class LlmGuardrailHook(CustomGuardrail):
         user_api_key_dict: Any,
         traceback_str: str | None = None,
     ) -> None:
-        # MCP 被治理擋下時也會呼叫；call_id 不在表中就什麼都不做
-        _PENDING.discard(owner_of(user_api_key_dict), request_data.get("litellm_call_id"))
+        # MCP 被治理擋下時也會呼叫；call_id 不在表或帳本中就什麼都不做
+        owner, call_id = owner_of(user_api_key_dict), request_data.get("litellm_call_id")
+        _PENDING.discard(owner, call_id)
+        try:
+            await (await get_services()).llm_gate.release(owner, call_id)
+        except Exception as error:
+            logger.error("llm usage release failed: %s", type(error).__name__)
 
     async def async_post_call_streaming_iterator_hook(
         self, user_api_key_dict: Any, response: Any, request_data: dict[str, Any]

@@ -34,13 +34,8 @@ class OpaPolicyClient:
         except ValueError as error:
             raise PolicyError("policy_error") from error
 
-    async def llm_config(
-        self, agent: AgentRef, user: UserIdentity | None = None
-    ) -> GuardrailConfig:
-        policy_input: dict[str, Any] = {"agent": agent.model_dump()}
-        # user 暫為選填；Task 8（LlmGate）會一律帶入，沒有 user 時只有 "*" 等級會符合
-        if user is not None:
-            policy_input["user"] = user.model_dump()
+    async def llm_config(self, agent: AgentRef, user: UserIdentity) -> GuardrailConfig:
+        policy_input = {"agent": agent.model_dump(), "user": user.model_dump()}
         result = await self._query(self.LLM_PATH, policy_input)
         try:
             return GuardrailConfig.model_validate(result)

@@ -1,5 +1,6 @@
 from datetime import timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 from fastapi import FastAPI
@@ -10,6 +11,7 @@ from ai_gov_gateway.engine.approvals import ApprovalService
 from ai_gov_gateway.engine.engine import GovernanceEngine
 from ai_gov_gateway.engine.guardrails.injection import RuleDetector
 from ai_gov_gateway.engine.guardrails.service import LlmGuardrail
+from ai_gov_gateway.engine.llm_gate import LlmGate
 from ai_gov_gateway.engine.models import Decision, ToolCall
 from ai_gov_gateway.engine.store import StoreError, StoreUnavailable
 from ai_gov_gateway.runtime import Services, get_services
@@ -18,6 +20,7 @@ from tests.fakes import (
     FakeGuardrailPolicy,
     FakePiiDetector,
     FakePolicy,
+    InMemoryLedger,
     InMemoryStore,
     id_sequence,
     policy_result,
@@ -51,9 +54,17 @@ def services(store: InMemoryStore) -> Services:
         rules=RuleDetector.from_file(Path(__file__).parents[1] / "guardrails/injection_rules.json"),
         max_chars=1000,
     )
-    return Services(
-        verifier=verifier, engine=engine, approvals=approvals, llm_guardrail=llm_guardrail
+    llm_gate = LlmGate(
+        verifier=verifier,
+        guardrail=llm_guardrail,
+        ledger=InMemoryLedger(store),
+        store=store,
+        priced=frozenset,
+        tz=ZoneInfo("Asia/Taipei"),
+        inflight_ttl=timedelta(seconds=300),
+        clock=clock,
     )
+    return Services(verifier=verifier, engine=engine, approvals=approvals, llm_gate=llm_gate)
 
 
 @pytest.fixture

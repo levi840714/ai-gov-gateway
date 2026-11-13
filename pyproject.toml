@@ -49,6 +49,10 @@ extend-exclude = ["docs"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
 
+[tool.ruff.lint.isort]
+# repo 的 litellm/ 是設定目錄，不是套件；不指定時 ruff 會把 litellm 當成第一方
+known-third-party = ["litellm"]
+
 [tool.mypy]
 python_version = "3.12"
 disallow_untyped_defs = true

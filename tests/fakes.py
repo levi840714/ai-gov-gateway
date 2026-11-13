@@ -341,9 +341,7 @@ class FakeGuardrailPolicy:
         self.agents: list[AgentRef] = []
         self.user: UserIdentity | None = None
 
-    async def llm_config(
-        self, agent: AgentRef, user: UserIdentity | None = None
-    ) -> GuardrailConfig:
+    async def llm_config(self, agent: AgentRef, user: UserIdentity) -> GuardrailConfig:
         self.agents.append(agent)
         self.user = user
         if self.error is not None:
