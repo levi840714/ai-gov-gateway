@@ -33,3 +33,35 @@
 
 - `probe_llm`：`GET /request-headers` 記錄每個請求的 header 名稱、`authorization` 是否為 JWT、哪些 header 含 JWT（不記值），`DELETE /requests` 一併清除；`probe:chunk_delay=<秒>` 讓 streaming 每個 chunk 前等待。之後的契約測試（B2、B6）也會用到
 - `litellm/config.spike-m5.yaml`、`docker-compose.spike-m5.yml`：與當時的 `config.yaml` 相同，只把 `llm-guardrail` 換成只記錄的 `M5SpikeGuardrail`，probe 模型加上測試單價。計畫原本寫修改 M4 的 `config.spike.yaml`，改為另建檔案，保留 M4 的重現環境
+
+## 真實 LLM 驗證（2026-11-14，實作計畫 Task 13）
+
+在 M5 實作完成後，以 gateway（本分支的映像）、alice 的 token 與 `kyt-agent@1.5` key 呼叫 `kyt-main`（`gemini/gemini-3.8-flash`）。輸出存於 `var/m5-real-check.txt`（不進版控），共 5 次呼叫，實際花費 $0.0523（略高於計畫估計的 $0.05，因為最大的請求有 6 萬 token）。
+
+### 結算與真實單價
+
+| 請求 | 帳本狀態 | 帳本成本 | `SpendLogs.spend` | 一致 |
+| ---- | -------- | -------- | ----------------- | ---- |
+| 40 個 tool 結果 | settled（callback） | 0.00591075 | 0.00591075 | 是 |
+| 140 個 tool 結果 | settled（callback） | 0.016667025 | 0.016667025 | 是 |
+| 300 個 tool 結果 | settled（callback） | 0.02777145 | 0.02777145 | 是 |
+| 長篇輸出，`max_tokens=256` | settled（callback） | 0.0009615 | 0.0009615 | 是 |
+| 同上 | settled（callback） | 0.0009615 | 0.0009615000000000001 | 是（四捨五入到第 12 位後相同） |
+
+### B8：字元數與 token 數
+
+請求內容取自 `tests/data/kyt_tool_outputs.jsonl`（kyt audit log 的真實工具輸出：hex 地址、交易對手清單、中文說明），以 assistant tool call 加 tool 結果的形式組成，`text_length()` 計算的字元數與 Gemini 回報的 `prompt_tokens`：
+
+| tool 結果數 | 字元數 | prompt_tokens | 字元／token |
+| ----------- | ------ | ------------- | ----------- |
+| 40 | 7,670 | 7,821 | 0.98 |
+| 140 | 28,474 | 28,757 | 0.99 |
+| 300 | 62,079 | 62,336 | 1.00 |
+
+- **B8 不成立，但差距很小**：kyt 的內容幾乎一個字元一個 token，token 數約為字元數的 1.00–1.02 倍（多出的部分包含 guardrail 加上的 spotlighting 邊界與角色標記）
+- 對設計的影響：只有 spec §8.6 的超額上界要乘上 1.02。`max_input_chars` 100,000 約等於 102,000 個輸入 token，單筆最大成本約 $0.092，`max_concurrent` 4 時上界約 $0.37
+- 這個比例只代表 kyt 的內容；英文為主的內容通常是 3–4 字元／token，上界反而更寬鬆
+
+### B7（順帶）：reasoning token 計入 `max_tokens`
+
+兩次 `max_tokens=256` 的長篇輸出：`completion_tokens` 252，其中 `reasoning_tokens` 245 與 243，`finish_reason` 為 `length`。Gemini 的 `max_tokens` 涵蓋 reasoning token，第二階段的預留不需要另加 reasoning 上限。第一階段的影響：輸出上限設太低時，可見的回答可能幾乎被 reasoning 用完；kyt 的上限 4,096 遠高於實測最大輸出 1,806，不受影響。
