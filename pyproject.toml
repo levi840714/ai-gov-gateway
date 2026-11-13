@@ -19,6 +19,7 @@ agw = "ai_gov_gateway.cli:app"
 
 [dependency-groups]
 dev = [
+    "hypothesis>=6.170.15",
     "mypy>=1.18",
     # 與 Dockerfile 的版本一致：主機上的單元測試用
     "presidio-analyzer==2.2.364",
