@@ -1,11 +1,23 @@
 from datetime import datetime, timedelta
+from decimal import Decimal
+from zoneinfo import ZoneInfo
 
 import pytest
 
 from ai_gov_gateway.engine.audit import first_invalid
+from ai_gov_gateway.engine.ledger import (
+    Admission,
+    DuplicateCallId,
+    LedgerUnavailable,
+    SettledRow,
+    Settlement,
+)
+from ai_gov_gateway.engine.limits import Overage, UsageLimits, usage_windows
 from ai_gov_gateway.engine.models import AgentRef, Approval, ApprovalStatus, AuditEvent
 from ai_gov_gateway.engine.store import ApprovalConflict, StoreUnavailable
-from tests.fakes import FakeClock, InMemoryStore
+from tests.fakes import GUARDRAIL_CONFIG, FakeClock, InMemoryLedger, InMemoryStore
+
+LEDGER_TZ = ZoneInfo("Asia/Taipei")
 
 
 def _approval(clock: FakeClock) -> Approval:
@@ -121,3 +133,58 @@ async def test_create_approval_rejects_second_open_approval_for_fingerprint():
         await store.create_approval(second, AuditEvent(event_type="approval_requested"))
     assert list(store.approvals) == ["apr_1"]
     assert len(store.audit) == 1
+
+
+def _ledger_admission(call_id: str, now: datetime) -> Admission:
+    return Admission(
+        owner="owner-a",
+        call_id=call_id,
+        agent_id="kyt-agent",
+        user_sub="alice-sub",
+        model="gemini",
+        limits=UsageLimits.model_validate(GUARDRAIL_CONFIG["limits"]),
+        windows=usage_windows(now, LEDGER_TZ),
+        inflight_since=now - timedelta(seconds=300),
+        now=now,
+    )
+
+
+def _ledger_settlement(call_id: str, cost: str, at: datetime) -> Settlement:
+    return Settlement(
+        owner="owner-a",
+        call_id=call_id,
+        cost_usd=Decimal(cost),
+        prompt_tokens=100,
+        completion_tokens=50,
+        at=at,
+        settled_by="callback",
+    )
+
+
+def _exceeded(row: SettledRow, overage: Overage, settlement: Settlement) -> AuditEvent:
+    return AuditEvent(event_type="llm_limit_exceeded", reasons=overage.exceeded)
+
+
+async def test_ledger_settles_overage_into_store_audit():
+    clock, store = FakeClock(), InMemoryStore()
+    ledger = InMemoryLedger(store)
+    for call_id, cost in (("c1", "1.99"), ("c2", "0.03")):
+        assert await ledger.admit(_ledger_admission(call_id, clock()), lambda _: None) is None
+        overage = await ledger.settle(
+            _ledger_settlement(call_id, cost, clock()), LEDGER_TZ, _exceeded
+        )
+    assert overage is not None and overage.day == Decimal("0.02")
+    assert [r.reasons for r in store.audit] == [["budget_day"]]
+    assert await ledger.settle(_ledger_settlement("c2", "1", clock()), LEDGER_TZ, _exceeded) is None
+
+
+async def test_ledger_audit_failure_leaves_row_in_flight():
+    clock, store = FakeClock(), InMemoryStore()
+    ledger = InMemoryLedger(store)
+    await ledger.admit(_ledger_admission("c1", clock()), lambda _: None)
+    store.fail = StoreUnavailable("down")
+    with pytest.raises(LedgerUnavailable):
+        await ledger.settle(_ledger_settlement("c1", "3", clock()), LEDGER_TZ, _exceeded)
+    assert ledger.rows[("owner-a", "c1")].status == "in_flight"
+    with pytest.raises(DuplicateCallId):
+        await ledger.admit(_ledger_admission("c1", clock()), lambda _: None)

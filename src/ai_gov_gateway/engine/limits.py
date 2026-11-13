@@ -63,6 +63,18 @@ def usage_windows(now: datetime, tz: ZoneInfo) -> UsageWindows:
     )
 
 
+def period_bounds(at: datetime, tz: ZoneInfo) -> dict[Period, tuple[datetime, datetime]]:
+    """at 所屬的日、月期別 [start, end)；結算時以放行時間決定一筆請求屬於哪一期。"""
+    local = at.astimezone(tz).date()
+    return {
+        "day": (_local_midnight(local, tz), _local_midnight(local + timedelta(days=1), tz)),
+        "month": (
+            _local_midnight(local.replace(day=1), tz),
+            _local_midnight(_next_month_start(local), tz),
+        ),
+    }
+
+
 def _retry_after(oldest: datetime | None, now: datetime) -> int:
     if oldest is None:
         return 1

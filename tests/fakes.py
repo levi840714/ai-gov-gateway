@@ -1,11 +1,33 @@
+import asyncio
 import re
 import threading
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from itertools import count
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from ai_gov_gateway.engine.audit import GENESIS_HASH, build_record
 from ai_gov_gateway.engine.guardrails.models import GuardrailConfig, PiiSpan
+from ai_gov_gateway.engine.ledger import (
+    Admission,
+    AuditBuilder,
+    DuplicateCallId,
+    LedgerUnavailable,
+    SettledRow,
+    Settlement,
+)
+from ai_gov_gateway.engine.limits import (
+    AdmissionSnapshot,
+    LimitDenial,
+    Overage,
+    Period,
+    SettleContext,
+    compute_overage,
+    period_bounds,
+)
 from ai_gov_gateway.engine.models import (
     AgentRef,
     Approval,
@@ -119,6 +141,148 @@ class InMemoryStore:
     async def audit_records(self) -> list[AuditRecord]:
         self._check()
         return [r.model_copy(deep=True) for r in self.audit]
+
+
+@dataclass
+class UsageRow:
+    admission: Admission
+    status: str = "in_flight"
+    cost: Decimal = Decimal("0")
+    tokens: int = 0
+    settled_at: datetime | None = None
+    overage: Overage | None = None
+
+    @property
+    def created_at(self) -> datetime:
+        return self.admission.now
+
+
+class InMemoryLedger:
+    """與 PostgresStore 的帳本相同規則；asyncio.Lock 取代（agent, 使用者）的 advisory lock。"""
+
+    def __init__(self, store: InMemoryStore) -> None:
+        self.store = store
+        self.rows: dict[tuple[str, str], UsageRow] = {}
+        self.fail: Exception | None = None
+        self._lock = asyncio.Lock()
+
+    def _check(self) -> None:
+        if self.fail is not None:
+            raise self.fail
+
+    def _user_rows(self, admission: Admission) -> list[UsageRow]:
+        user = (admission.agent_id, admission.user_sub)
+        return [
+            r for r in self.rows.values() if (r.admission.agent_id, r.admission.user_sub) == user
+        ]
+
+    def _snapshot(self, admission: Admission) -> AdmissionSnapshot:
+        windows = admission.windows
+        rows = self._user_rows(admission)
+        settled = [r for r in rows if r.status == "settled"]
+        minute = [r.created_at for r in rows if r.created_at > windows.minute_start]
+        recent = [r for r in settled if r.settled_at and r.settled_at > windows.minute_start]
+        return AdmissionSnapshot(
+            day_usd=sum((r.cost for r in settled if r.created_at >= windows.day_start), Decimal(0)),
+            month_usd=sum(
+                (r.cost for r in settled if r.created_at >= windows.month_start), Decimal(0)
+            ),
+            in_flight=sum(
+                1
+                for r in rows
+                if r.status == "in_flight" and r.created_at > admission.inflight_since
+            ),
+            minute_requests=len(minute),
+            minute_oldest=min(minute, default=None),
+            minute_tokens=sum(r.tokens for r in recent),
+            minute_oldest_settled=min((r.settled_at for r in recent if r.settled_at), default=None),
+        )
+
+    async def admit(
+        self, admission: Admission, check: Callable[[AdmissionSnapshot], LimitDenial | None]
+    ) -> LimitDenial | None:
+        async with self._lock:
+            self._check()
+            denial = check(self._snapshot(admission))
+            if denial is not None:
+                return denial
+            key = (admission.owner, admission.call_id)
+            if key in self.rows:
+                raise DuplicateCallId(admission.call_id)
+            self.rows[key] = UsageRow(admission=admission.model_copy(deep=True))
+            return None
+
+    def _context(self, row: UsageRow, settlement: Settlement, tz: ZoneInfo) -> SettleContext:
+        bounds = period_bounds(row.created_at, tz)
+        others = [r for r in self._user_rows(row.admission) if r.status == "settled"]
+        minute_start = settlement.at - timedelta(seconds=60)
+
+        def cost_in(period: Period) -> Decimal:
+            start, end = bounds[period]
+            return sum((r.cost for r in others if start <= r.created_at < end), Decimal(0))
+
+        return SettleContext(
+            limits=row.admission.limits,
+            cost=settlement.cost_usd,
+            tokens=settlement.prompt_tokens + settlement.completion_tokens,
+            day_before=cost_in("day"),
+            month_before=cost_in("month"),
+            minute_tokens_before=sum(
+                r.tokens
+                for r in others
+                if r.settled_at and minute_start < r.settled_at <= settlement.at
+            ),
+        )
+
+    async def settle(
+        self, settlement: Settlement, tz: ZoneInfo, build_audit: AuditBuilder
+    ) -> Overage | None:
+        async with self._lock:
+            self._check()
+            row = self.rows.get((settlement.owner, settlement.call_id))
+            if row is None or row.status == "settled":
+                return None
+            overage = compute_overage(self._context(row, settlement, tz))
+            if overage.exceeded:
+                admission = row.admission
+                settled = SettledRow(
+                    agent_id=admission.agent_id,
+                    user_sub=admission.user_sub,
+                    model=admission.model,
+                    tier=admission.limits.tier,
+                    call_id=admission.call_id,
+                    created_at=admission.now,
+                )
+                # 稽核失敗時帳本不變，與 Postgres 的交易回滾相同
+                try:
+                    await self.store.append_audit(
+                        build_audit(settled, overage, settlement), settlement.at
+                    )
+                except Exception as error:
+                    raise LedgerUnavailable(type(error).__name__) from error
+            row.status = "settled"
+            row.cost = settlement.cost_usd
+            row.tokens = settlement.prompt_tokens + settlement.completion_tokens
+            row.settled_at = settlement.at
+            row.overage = overage
+            return overage
+
+    async def release(self, owner: str, call_id: str) -> bool:
+        async with self._lock:
+            self._check()
+            row = self.rows.get((owner, call_id))
+            if row is None or row.status != "in_flight":
+                return False
+            row.status = "released"
+            return True
+
+    async def stale_in_flight(self, older_than: datetime, limit: int) -> list[tuple[str, str]]:
+        self._check()
+        rows = [
+            r for r in self.rows.values() if r.status == "in_flight" and r.created_at < older_than
+        ]
+        rows.sort(key=lambda r: r.created_at)
+        return [(r.admission.owner, r.admission.call_id) for r in rows[:limit]]
 
 
 def policy_result(decision: Decision, *reasons: str) -> PolicyDecision:

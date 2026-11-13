@@ -14,6 +14,7 @@ from ai_gov_gateway.engine.limits import (
     check_admission,
     compute_overage,
     overage,
+    period_bounds,
     usage_windows,
 )
 
@@ -77,6 +78,15 @@ def test_windows_use_local_calendar():
 def test_window_after_local_midnight():
     windows = usage_windows(datetime(2026, 11, 13, 16, 30, tzinfo=UTC), TZ)  # 台北 11/14 00:30
     assert windows.day_start == datetime(2026, 11, 14, 0, 0, tzinfo=TZ)
+
+
+def test_period_bounds_end_at_next_local_period():
+    bounds = period_bounds(datetime(2026, 12, 31, 16, 30, tzinfo=UTC), TZ)  # 台北 2027/1/1 00:30
+    assert bounds["day"] == (
+        datetime(2027, 1, 1, tzinfo=TZ),
+        datetime(2027, 1, 2, tzinfo=TZ),
+    )
+    assert bounds["month"] == (datetime(2027, 1, 1, tzinfo=TZ), datetime(2027, 2, 1, tzinfo=TZ))
 
 
 def test_admit_when_below_limits():
