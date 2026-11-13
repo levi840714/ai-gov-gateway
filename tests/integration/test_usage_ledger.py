@@ -213,15 +213,7 @@ async def test_snapshot_separates_day_and_month(store):
 
 
 async def test_snapshot_minute_windows(store):
-    # rpm 以 created_at 計算，tpm 以 settled_at 計算
-    await _seed(
-        store,
-        "created-old-settled-recent",
-        "0.001",
-        now=NOW - timedelta(seconds=90),
-        settled_at=NOW - timedelta(seconds=30),
-        tokens=(100, 50),
-    )
+    # rpm 以 created_at 計算，tpm 以 settled_at 計算；依結算時間的先後寫入
     await _seed(
         store,
         "both-old",
@@ -229,6 +221,14 @@ async def test_snapshot_minute_windows(store):
         now=NOW - timedelta(seconds=80),
         settled_at=NOW - timedelta(seconds=65),
         tokens=(900, 100),
+    )
+    await _seed(
+        store,
+        "created-old-settled-recent",
+        "0.001",
+        now=NOW - timedelta(seconds=90),
+        settled_at=NOW - timedelta(seconds=30),
+        tokens=(100, 50),
     )
     await _admit(store, "recent", now=NOW - timedelta(seconds=20))
     snapshot = await _snapshot(store)
@@ -340,6 +340,23 @@ async def test_concurrent_settlements_sum_exactly(store):
     assert len([o for o in overs if o > 0]) == len(records)
     assert [r.details["crossed"]["budget_day"] for r in records].count(True) == 1
     assert first_invalid(records) is None
+
+
+async def test_settlement_time_follows_lock_order(store):
+    # callback 在等鎖之前取得結算時間：後取得鎖的那筆，時間可能比先結算的早
+    limits = LIMITS.model_copy(update={"tpm": 200})
+    await _admit(store, "c1", limits=limits)
+    await _admit(store, "c2", limits=limits)
+    later, earlier = NOW + timedelta(seconds=2), NOW + timedelta(seconds=1)
+    first = await store.settle(_settlement("c1", "0.01", at=later), TZ, _audit)
+    second = await store.settle(_settlement("c2", "0.01", at=earlier), TZ, _audit)
+    assert first is not None and second is not None
+    # 各 150 token：先結算的沒有超出，後結算的超出 150 + 150 − 200
+    assert (first.tpm_tokens, second.tpm_tokens) == (0, 100)
+    row = await _row("c2")
+    assert row is not None and row["settled_at"] == later
+    [record] = await store.audit_records()
+    assert record.ts == later
 
 
 async def test_audit_failure_rolls_back_settlement(store):

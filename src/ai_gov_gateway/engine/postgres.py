@@ -254,6 +254,23 @@ async def _ledger_errors() -> AsyncIterator[None]:
         raise LedgerUnavailable(type(error).__name__) from error
 
 
+async def _in_lock_order(
+    conn: psycopg.AsyncConnection[DictRow], row: DictRow, settlement: Settlement
+) -> Settlement:
+    """結算時間在等鎖之前取得，並行時可能比先結算的那筆早；調成不早於它，
+    settled_at 與 tpm 視窗才與結算順序一致（否則兩筆互相看不到，tpm 超額少算）。"""
+    cursor = await conn.execute(
+        "SELECT max(settled_at) AS latest FROM llm_usage "
+        "WHERE agent_id = %s AND user_sub = %s AND status = 'settled'",
+        (row["agent_id"], row["user_sub"]),
+    )
+    found = await cursor.fetchone()
+    latest = found["latest"] if found else None
+    if latest is None or latest <= settlement.at:
+        return settlement
+    return settlement.model_copy(update={"at": latest})
+
+
 async def _settle_context(
     conn: psycopg.AsyncConnection[DictRow], row: DictRow, settlement: Settlement, tz: ZoneInfo
 ) -> SettleContext:
@@ -504,6 +521,7 @@ class PostgresStore:
             # 同一筆的另一個結算事件可能在等鎖期間完成
             if row is None or row["status"] == "settled":
                 return None
+            settlement = await _in_lock_order(conn, row, settlement)
             overage = compute_overage(await _settle_context(conn, row, settlement, tz))
             await conn.execute(
                 SETTLE_UPDATE,
