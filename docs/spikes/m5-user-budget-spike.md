@@ -1,7 +1,7 @@
 # M5 依使用者預算：LiteLLM v1.105.1 的驗證
 
 - 日期：2026-11-13
-- 狀態：靜態檢查已完成（L1–L10）；執行期驗證（B1–B10）待實作計畫 Task 1 執行，結果寫入 `docs/spikes/m5-findings.md`
+- 狀態：靜態檢查已完成（L1–L10）；執行期驗證待實作計畫 Task 1（B1–B6、B9、B10）與 Task 13（B8）執行，結果寫入 `docs/spikes/m5-findings.md`。B7 只有第二階段的預留需要
 - 對應設計：[M5 依委託使用者限制 LLM 用量](../specs/2026-11-13-user-budget-design.md)
 
 ## 目的
@@ -31,9 +31,9 @@
 
 - 原本的做法是「在 pre-call hook 用 token subject 覆寫 `user`」，依 L4 不會生效：預算檢查與花費歸屬都在 hook 之前就用 client 自填的 id 決定了
 - 被注入的 agent 可以在 header 或 body 帶任意 id（L2），沒有預設預算時等於不受限，有預設預算時換 id 就得到新額度（L3）
-- 要讓 A 可行，必須在 LiteLLM 認證之前（ASGI middleware）驗證 token、移除 client 帶的所有 end user 來源、再補上可信的 `x-litellm-end-user-id`。即使如此，仍然是事後累計（L6），並行請求沒有預留，拒絕時也不會寫進我們的 hash chain。比較見 spec §5
+- 要讓 A 可行，必須在 LiteLLM 認證之前（ASGI middleware）驗證 token、移除 client 帶的所有 end user 來源、再補上可信的 `x-litellm-end-user-id`。即使如此，額度只能依使用者、不能依（agent, 使用者），超出多少沒有紀錄，拒絕也不會寫進我們的 hash chain。比較見 spec §5
 
-## 執行期驗證（待 Task 1）
+## 執行期驗證（待 Task 1、Task 13）
 
 做法與 M4 相同：以 `scripts/spikes/m5_budget_probe.py` 註冊一個只記錄的 guardrail（`litellm/config.spike.yaml` 疊加），對 `probe_llm` 送請求，從日誌與 `probe_llm` 的請求紀錄判斷。任一項不成立時停下來回報，由 controller 調整設計，不要自行改。
 
@@ -43,9 +43,9 @@
 | B2 | 同上的請求由 `x-litellm-api-key` 認證成功；`Authorization` 不會被轉送給 provider（`probe_llm` 記錄的 header 沒有 JWT）；`AuthorizationHeaderGuard` 不擋 | spec §4.2 | 同 B1 的替代方案 |
 | B3 | guardrail 類別（`CustomGuardrail` 繼承 `CustomLogger`）的 `async_log_success_event` 會被呼叫：kwargs 的 `litellm_call_id` 與 pre-call 相同；`kwargs["response_cost"]` 或 `standard_logging_object["response_cost"]` 與 `LiteLLM_SpendLogs.spend` 相同；streaming 在串流結束後呼叫一次；router fallback 時只對成功的那次呼叫一次；拿得到 key 的雜湊（與 `owner_of` 相同的來源） | spec §8.3 | 另寫一個只做結算的 `CustomLogger`，在 `litellm_settings.callbacks` 註冊 |
 | B4 | `async_log_failure_event` 在 router 重試、fallback 前的每次失敗是否都會呼叫 | spec §8.3：確認不能用它釋放預留 | 無影響（設計只用 `async_post_call_failure_hook` 釋放） |
-| B5 | rate limit 觸發的 fallback：第二個 `call_id` 不會收到任何 success / failure 事件 | spec §8.4 | 改由該事件釋放，縮短 TTL |
-| B6 | streaming 中途 client 斷線時，是否有 success 或 failure 事件、cost 是否為已產生的部分 | spec §8.3 | 列為已知限制，靠 TTL 回收 |
-| B7 | Gemini 的 `max_tokens` 是否涵蓋 reasoning token：以真實 `kyt-main` 送 2 次（`max_tokens=256`，成本 < $0.01），回報的 `completion_tokens`（含 `reasoning_tokens`）不超過 256 | spec §7.3、§8.2 | 預留時另加 reasoning 的上限，或在白名單開放並強制 `reasoning_effort` |
-| B8 | 輸入 token 的估計：請求 JSON 的字元數不小於 provider 回報的 `prompt_tokens`。取 kyt 真實請求（中文、英文與 hex 地址混合）送 3 次 Gemini | spec §8.2 | 估計乘上係數，係數取實測最大比值的 1.5 倍 |
+| B5 | rate limit 觸發的 fallback：第二個 `call_id` 不會收到任何 success / failure 事件 | spec §8.3、§8.5 | 改由該事件釋放 |
+| B6 | streaming 中途 client 斷線時，是否有 success 或 failure 事件、cost 是否為已產生的部分 | spec §8.3 | 由對帳處理，列為已知限制 |
+| B7 | Gemini 的 `max_tokens` 是否涵蓋 reasoning token：以真實 `kyt-main` 送 2 次（`max_tokens=256`，成本 < $0.01），回報的 `completion_tokens`（含 `reasoning_tokens`）不超過 256 | spec §16（第二階段） | 預留時另加 reasoning 的上限，或在白名單開放並強制 `reasoning_effort` |
+| B8 | 輸入 token 的估計：請求 JSON 的字元數不小於 provider 回報的 `prompt_tokens`。取 kyt 真實請求（中文、英文與 hex 地址混合）送 3 次 Gemini | spec §8.6 的超額上界（第一階段不影響判斷）；§16 的估計 | 上界與估計乘上實測最大比值 |
 | B9 | key 的 `budget_duration: "1mo"` 被 `/key/update` 接受，`budget_reset_at` 有值 | spec §6.3 | 改用 `"30d"` |
-| B10 | pre-call 改寫的 `data["max_tokens"]` 會送到 provider，router fallback 也沿用 | spec §7.3 | 改為只拒絕、不補預設值 |
+| B10 | pre-call 改寫的 `data["max_tokens"]` 會送到 provider，router fallback 也沿用 | spec §7 | 改為只拒絕、不補預設值 |
