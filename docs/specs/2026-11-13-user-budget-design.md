@@ -300,7 +300,7 @@ SELECT pg_advisory_xact_lock(72410002, hashtext(agent_id || ':' || user_sub));
 1. 讀出這一筆所屬的日、月期別中**其他已結算**請求的成本總和 `before`；期別以這一筆的放行時間決定，上下界都要比對（23:59 放行、午夜後才結算的請求仍算前一天）
 2. `after = before + cost`
 3. 這一筆的超額 `over = max(0, after − max(before, limit))`，日、月各算一次，`limit` 取這一筆放行時的快照
-4. tpm 同理：視窗為結算時間往前 60 秒，`before` 為視窗內其他已結算請求的 token，`limit` 為快照的 `tpm`。結算時間在等鎖之前取得，取得鎖後若早於這位使用者最新的 `settled_at`，就調成那個時間：並行結算時後拿到鎖的那筆可能帶著較早的時間，視窗會漏掉剛結算的那筆，兩筆互相看不到，tpm 的超額就少算
+4. tpm 同理：視窗為結算時間往前 60 秒，`before` 為視窗內其他已結算請求的 token，`limit` 為快照的 `tpm`。結算時間在等鎖之前取得，取得鎖後若早於這位使用者最新的 `settled_at`，就調成那個時間：並行結算時後拿到鎖的那筆可能帶著較早的時間，視窗會漏掉剛結算的那筆，兩筆互相看不到，tpm 的超額就少算。這個調整只用於 callback；對帳補結算的是舊請求，保留它真實的結束時間（§8.5）
 5. 更新這一筆的 `status`、成本、token 與三個超額欄位
 6. 任一個超額大於 0 時，**在同一個交易中**寫入 `llm_limit_exceeded` 稽核（§10.2）
 
@@ -320,7 +320,7 @@ docker compose exec gateway python -m ai_gov_gateway.reconcile --older-than 10m
 ```
 
 - 找出 `in_flight` 且放行超過指定時間的紀錄，以 `(sha256(api_key), litellm_call_id)` 對照 `LiteLLM_SpendLogs`
-- 有 `status = success` 的紀錄：以它的 `spend`、`prompt_tokens`、`completion_tokens` 結算，走 §8.4 同一套計算，`settled_by = reconcile`
+- 有 `status = success` 的紀錄：以它的 `spend`、`prompt_tokens`、`completion_tokens` 結算，走 §8.4 同一套計算，`settled_by = reconcile`。結算時間取該紀錄的 `endTime`（UTC），舊用量才不會落進目前的 tpm 視窗而造成假的 429 或假超額，也不套用鎖順序的調整；沒有 `endTime` 時退回對帳當下的時間
 - 只有失敗紀錄：標為 `released`
 - 都沒有：放行未超過 `--release-missing-after`（預設 1 小時）時保留 `in_flight`，等 LiteLLM 的批次寫入；超過後標為 `released`，在輸出中分開計數（`released_missing`）。rate limit fallback 的第二個 `call_id` 在 SpendLogs 沒有任何紀錄（B5），不這樣處理會累積永遠無法解決的紀錄
 - 對帳是補救，不是主要路徑；輸出的筆數可以當作 callback 遺失的監控指標
@@ -539,6 +539,7 @@ estimate_usd    = input_estimate × 最高輸入單價 + max_output_tokens × �
 | 結算的 `call_id` | 未指定來源 | 取 `kwargs["litellm_call_id"]`；`standard_logging_object["id"]` 不是 call_id | B3；§8.3 已改 |
 | 結算的成本 | `Decimal(response_cost)` | `round(value, 12)` 後再轉 `Decimal`；對帳的 `spend` 也一樣處理 | `response_cost` 有二進位誤差（B3），四捨五入後與 `SpendLogs.spend` 相同；§8.3 已改 |
 | 結算時間 | 結算事件的時間 | 取得使用者鎖後，若早於這位使用者最新的 `settled_at` 就調成那個時間（`_in_lock_order`） | 並行結算時後拿到鎖的那筆可能帶著較早的時間，兩筆的 tpm 視窗互相看不到，超額少算（`fd12710`）；§8.4 已改 |
+| 對帳的結算時間 | 對帳當下的時間 | 讀 `LiteLLM_SpendLogs` 的 `endTime` 當結算時間，且 `_in_lock_order` 只套用在 callback 的結算；沒有 `endTime` 時退回當下 | 以當下時間結算會讓舊 token 落進目前 60 秒的 tpm 視窗，造成假的 429 與假的 tpm 超額；§8.4、§8.5 已改 |
 | 結算的期別 | 期別的起點 | 以放行時間求出期別的 `[start, end)`，`before` 同時比對上下界（`period_bounds`） | 23:59 放行、午夜後才結算的請求，若只比對起點會把隔天已結算的成本也算進 `before` |
 | 帳本欄位 | 沒有 `key_alias` | `llm_usage` 多一欄 `key_alias`，`llm_limit_exceeded` 稽核的 `key_alias` 取自帳本 | 結算事件拿不到 key 名稱，稽核要能對照是哪個版本（`0f2ecb0`） |
 | `n` | 沒有限制 | 必須沒帶或剛好是 1，否則 400 `unsupported_field`（`field: "n"`），並寫 `llm_access` | 審查時發現 `n` 個回應會讓單筆成本變成 n 倍，§8.6 的上界不成立（`70a556e`）；§7、§10.1 已改 |
@@ -559,4 +560,5 @@ estimate_usd    = input_estimate × 最高輸入單價 + max_output_tokens × �
 | LiteLLM 以 **key** 的 rpm / tpm 擋下有 fallback 的模型時，以新的 `call_id` 重跑 pre-call | gateway 放行了第二個 `call_id`，但它收不到任何結算或失敗事件：在 `GOV_USAGE_INFLIGHT_TTL_SECONDS`（300 秒）內佔一個 `max_concurrent`，60 秒內計入 rpm；對帳在 1 小時後標為 `released`（`released_missing`），成本為 0 | 第一階段只記錄，不修正。只在 key 的總量被打滿時發生，影響是暫時少一個同時進行數；修正需要分辨 LiteLLM 的重跑，依賴更多內部行為。契約測試的限流探測改用沒有 fallback 的 `probe-fallback`，避免留下這種紀錄 |
 | 有單價的模型別名在每個 process 第一次使用時建立後快取 | 以 LiteLLM 的 API 新增模型或 fallback 後，新的別名在重啟前一律 503 `budget_unavailable` | 新增模型後重啟 gateway；fail-closed，不會放行沒有單價的模型 |
 | 沿用進行中 `call_id` 的請求被拒絕，但它的 failure hook 沒有觸發 | 抵銷的次數留在 `AdmittedCalls`，原請求之後真的失敗時不會被釋放，要等 300 秒的 TTL 或對帳 | fail-closed，只影響自己（重複使用 `call_id` 的同一把 key）的同時進行數 |
+| `max_input_chars`、`text_length` 只計 `messages` 的文字 | 不含 `tools` 的 schema 與 `image_url`，§8.6 的上界以只有文字內容為前提；大量的 tools 定義或圖片會讓實際輸入成本高於上界 | 只記錄；kyt 目前只送文字，需要時再把這兩項納入計算 |
 | streaming 中途斷線（B6） | 帳本只記到斷線前的用量；真實 provider 斷線後可能已產生並計費更多輸出 | 列入 README 已知限制 |

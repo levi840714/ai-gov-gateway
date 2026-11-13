@@ -49,7 +49,7 @@ ai-gov-gateway/
 LiteLLM 固定在 v1.105.1：tool 定義鎖定從此版起才有；`plugin.py` 依賴 `CustomGuardrail` 介面、`litellm.proxy.proxy_server.app`（含已建好的 `middleware_stack`）與 hook 的 `mcp_*` 欄位。
 LLM guardrail 另外依賴 `call_type` 的值（`acompletion`）、`litellm_call_id` 在 pre-call 與 post-call 之間不變、`proxy_server_request.body`，以及 streaming 時不呼叫 success hook（`docs/spikes/m4-findings.md` A1–A6）。
 依使用者的額度另外依賴（`docs/spikes/m5-findings.md` B1–B10）：`data["secret_fields"]["raw_headers"]` 含原始的 `Authorization`；key 的認證在 guardrail 之前、以 `x-litellm-api-key` 優先；`async_log_success_event` 每個請求一次，`kwargs["litellm_call_id"]` 與 `standard_logging_object` 的 `response_cost`、`prompt_tokens`、`completion_tokens`、`metadata.user_api_key_hash`；pre-call 改寫的 `max_tokens` 會送到 provider；對帳讀 `LiteLLM_SpendLogs` 的 `litellm_call_id`、`api_key`、`status`、`spend`、`prompt_tokens`、`completion_tokens`。
-**升級 LiteLLM 前必須跑 `uv run pytest -m integration`**（含 gateway、LLM guardrail 與額度的契約測試），結果須為 69 passed 而非 skipped，並跑 `uv run python -m scripts.demo_m4` 確認 13/13、`uv run python -m scripts.demo_m5` 確認 19/19。三者都使用正式的 `kyt-agent@1.5` key 搭配 probe 模型，tpm 情境會等限流視窗過去，整合測試約 2 分半、`demo_m4` 多約 1 分鐘。
+**升級 LiteLLM 前必須跑 `uv run pytest -m integration`**（含 gateway、LLM guardrail 與額度的契約測試），結果須為 71 passed 而非 skipped，並跑 `uv run python -m scripts.demo_m4` 確認 13/13、`uv run python -m scripts.demo_m5` 確認 19/19。三者都使用正式的 `kyt-agent@1.5` key 搭配 probe 模型，tpm 情境會等限流視窗過去，整合測試約 2 分半、`demo_m4` 多約 1 分鐘。
 升級後也要重新比對 Presidio 的相依：映像內 `pip freeze` 的既有套件不能被改版。
 
 `engine/` 不 import LiteLLM、FastAPI 與 `config`；依賴方向為 `plugin` / `api` → `runtime` → `engine` / `config`，`runtime` 負責把設定注入引擎。
@@ -97,7 +97,7 @@ docker run --rm -v "$PWD/policies:/policies:ro" openpolicyagent/opa:1.21.1 test 
 - 受治理的 key 一律以 `<agent>@<版本>` 命名並在 `policies/agents/data.json` 的 `versions` 註冊；一個版本一把 key，LLM 與 tool 呼叫共用，兩條路徑都以 `governance.rego` 的 `registered` 判斷。新增 LLM 路徑的檢查時不要只看 `@` 之前的 agent 名稱
 - LLM 路徑的使用者身份只來自驗證過的 token；`user`、`metadata.user_id`、`x-litellm-end-user-id` 等 client 自帶的身份一律拒絕，不要改成覆寫（LiteLLM 在 hook 之前就用這些值建立 end user 並記錄）
 - 不要設定 LiteLLM 的 `user_header_mappings`、`user_header_name`、`max_end_user_budget_id`：它們讓 client 的 header 成為 end user 身份或預算的依據
-- 受治理的模型別名與它的 fallback 都要有單價（`litellm.model_cost` 或 deployment 的 `model_info`）；沒有單價時成本為 0，個人預算形同虛設，gateway 會回 503 `budget_unavailable`
+- 受治理的模型別名與它的 fallback 都要有單價（`litellm.model_cost` 或 deployment 的 `model_info`）；沒有單價時成本為 0，個人預算形同虛設，gateway 會回 503 `budget_unavailable`。價格檢查只跟隨 router 的 `fallbacks`；`default_fallbacks`、`context_window_fallbacks`、`content_policy_fallbacks` 目前未使用，引入時要加進 `engine/pricing.py`
 - 受治理的 key 一律設 `allowed_routes`（`scripts/make_keys.py` 的 `LLM_ROUTES`、`MCP_ROUTES`）：provider pass-through、files、threads 不經過 pre-call hook，沒有限制路由就能繞過 guardrail
 
 ## 已知問題
