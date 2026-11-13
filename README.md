@@ -4,7 +4,7 @@ AI Governance Gateway 是 AI agent 存取 LLM 與工具的統一治理入口。�
 
 **AI agent 要替人執行高風險動作時，先確認身份、套用 policy，必要時等人核准；送給模型的內容，先擋下注入、遮蔽個資。**
 
-兩條流量各自經過這些檢查：
+兩條路徑各自經過這些檢查：
 
 - **tool 呼叫**：檢查是哪個 agent、代表哪位使用者、這個動作能不能做、要不要 Supervisor 核准
 - **LLM 請求**：檢查代表哪位使用者、這位使用者的額度還夠不夠；檢查 tool 結果裡有沒有夾帶指令，送出前把個資換成代號，回應時再換回原值
@@ -13,7 +13,7 @@ AI Governance Gateway 是 AI agent 存取 LLM 與工具的統一治理入口。�
 
 ![ai-gov-gateway 的整體架構與能力](docs/images/architecture.svg)
 
-LLM 與 tool 兩條流量各自經過治理，再送到模型供應商與下游系統；顏色標示每項能力加入的開發階段。
+gateway 先做兩條路徑共用的檢查（Authorization、路由、agent 版本、委託人），再分成 LLM Gateway 與 MCP Gateway 各自處理，最後送到模型供應商與下游系統；顏色標示每項能力加入的開發階段。
 
 一次需要核准的 tool 呼叫大致是這樣：
 
@@ -43,7 +43,7 @@ agent 執行有副作用的動作（例如凍結帳戶、送出申報）之前�
 | 預設拒絕 | token 無效、policy 沒回應、資料庫或稽核寫入失敗、guardrail 無法判斷時，一律拒絕 |
 | 資料最小化 | 送給模型供應商前，身分證、電話、帳號、API key 等換成代號；對照表只存在 gateway 的記憶體 |
 | 外部資料不是指令 | tool 結果包上資料邊界，命中注入規則時依 agent 設定移除、拒絕或標記 |
-| 依使用者的額度 | 每位使用者在每個 agent 有自己的日、月預算與流量上限；用完後只擋他自己，超出的量逐筆記錄 |
+| 依使用者的額度 | 每位使用者在每個 agent 有自己的日、月預算與請求數、token 上限；用完後只擋他自己，超出的量逐筆記錄 |
 
 ## 功能
 
@@ -72,7 +72,7 @@ LLM guardrail：
 - **單次上限**：輸入字元數與輸出 token 有上限，沒帶 `max_tokens` 時補上，把跨過上限時的超額限制在已知範圍
 - **超額紀錄與對帳**：回應後以 LiteLLM 的實際成本結算，逐筆記錄超出日、月預算與 tpm 的量並寫入稽核；遺失的結算由對帳指令補回
 
-流量管理（由 LiteLLM 提供，gateway 設定）：
+路由與用量（由 LiteLLM 提供，gateway 設定）：
 
 - 模型別名、依 key 計費、rpm 與 tpm 限流、每月重置的 key 預算（agent 的總額度）
 - Gemini 出錯時改送 `gpt-6-luna`
@@ -120,7 +120,7 @@ LLM 請求（`/v1/chat/completions`）的處理順序見 [LLM guardrail](#llm-gu
 
 ## 快速開始
 
-需要 Docker（含 Compose）、[uv](https://docs.astral.sh/uv/)、Python 3.12 以上。只有 LLM 流量會用到 Gemini API key；`OPENAI_API_KEY` 選填，只有 fallback 會用到。
+需要 Docker（含 Compose）、[uv](https://docs.astral.sh/uv/)、Python 3.12 以上。只有 LLM 請求會用到 Gemini API key；`OPENAI_API_KEY` 選填，只有 fallback 會用到。
 
 ```bash
 # 1. 建立 .env，填入 LITELLM_MASTER_KEY（sk- 開頭）、POSTGRES_PASSWORD、GOOGLE_API_KEY、KEYCLOAK_ADMIN_PASSWORD
@@ -218,7 +218,7 @@ agent 用 MCP client 連到 `http://localhost:4000/mcp`，並帶上兩個 header
 
 LLM 的請求用 OpenAI 相容格式送到 `http://localhost:4000/v1/chat/completions`，模型名稱用 `litellm/config.yaml` 裡定義的別名。header 與 tool 呼叫相同：`x-litellm-api-key` 放 agent 版本的 key，`Authorization` 放委託人的 Keycloak token（M5 起必填，沒帶回 `401 missing_user_token`）。LLM 與 tool 呼叫用同一把 key，例如 kyt_agent 的 `LLM_API_KEY` 與 `GATEWAY_API_KEY` 都填 `kyt-agent@1.5` 的 key。
 
-> **不相容變更（M5）**：LLM 請求的 `Authorization` 必須是使用者 token，key 只能放 `x-litellm-api-key`。kyt_agent v1.5 把 key 放在 `Authorization`，M5 之後會回 `401 invalid_user_token`，所以經 gateway 的 kyt LLM 呼叫會失敗。kyt_agent 要改成 v1.6（以 `kyt-agent@1.6` 註冊並帶使用者 token，見 [spec §4.5、§12](docs/specs/2026-11-13-user-budget-design.md)，另開計畫）並與 M5 一起部署；在那之前不要把 v1.5 的 LLM 流量導向 M5 的 gateway。
+> **不相容變更（M5）**：LLM 請求的 `Authorization` 必須是使用者 token，key 只能放 `x-litellm-api-key`。kyt_agent v1.5 把 key 放在 `Authorization`，M5 之後會回 `401 invalid_user_token`，所以經 gateway 的 kyt LLM 呼叫會失敗。kyt_agent 要改成 v1.6（以 `kyt-agent@1.6` 註冊並帶使用者 token，見 [spec §4.5、§12](docs/specs/2026-11-13-user-budget-design.md)，另開計畫）並與 M5 一起部署；在那之前不要把 v1.5 的 LLM 請求導向 M5 的 gateway。
 
 Keycloak 的 access token 只有 300 秒，agent 要在每次請求前取得未過期的 token。版本未註冊或 agent 未登記時回 `403 unregistered_agent_version`，與 tool 呼叫相同。受治理的 key 只能呼叫 chat completions 與 MCP，請求會經過 [LLM guardrail](#llm-guardrail) 與 [依使用者的 LLM 額度](#依使用者的-llm-額度)。
 
@@ -703,7 +703,7 @@ LLM guardrail 與額度的契約測試需要 `probe_llm`、Keycloak 的測試帳
 
 LLM guardrail：
 
-- LLM 請求從 M4 起依賴 OPA。OPA 停擺時所有 LLM 流量都會失敗（`503 policy_unavailable`），可用性要求比只影響高風險 tool 時更高
+- LLM 請求從 M4 起依賴 OPA。OPA 停擺時所有 LLM 請求都會失敗（`503 policy_unavailable`），可用性要求比只影響高風險 tool 時更高
 - 規則比對換個說法就能繞過（例如 Ignore everything above、同形字）。它是多層防護的一層，搭配 spotlighting、高風險 tool 的 Supervisor 核准與 agent 自身的防護，不保證擋下所有注入
 - tool 結果在送進 LLM 時才檢查，agent 本地已經讀到原文；LLM 不經 gateway 的 agent 不受保護
 - 只有 tool 結果會正規化。其他訊息被零寬字元拆開的 email 不會被遮蔽
@@ -721,7 +721,7 @@ LLM guardrail：
 依使用者的 LLM 額度：
 
 - 事後累計：跨過上限時還在進行中的請求都會放行，最後一批會超過上限。超額有上界（kyt 的設定下約 $0.37，見 [spec §8.6](docs/specs/2026-11-13-user-budget-design.md)），每一筆超出多少都記在帳本與稽核；需要「不得超過」的硬上限時要做第二階段的預留（spec §16）
-- LLM 路徑依賴 Postgres：帳本連不上時所有 LLM 流量回 `503 budget_unavailable`，與 OPA 停擺相同
+- LLM 路徑依賴 Postgres：帳本連不上時所有 LLM 請求回 `503 budget_unavailable`，與 OPA 停擺相同
 - 結算延遲超過 `GOV_USAGE_INFLIGHT_TTL_SECONDS`（300 秒）時，那一筆不再計入同時進行數，之後才結算的成本會讓實際超額大於上界
 - 被注入的 agent 可以大量觸發拒絕，每一次都寫一筆 `llm_access` 到 hash chain；拒絕不經過模型，成本只有稽核寫入
 - LiteLLM 以 key 的 rpm / tpm 擋下有 fallback 的模型（例如 `kyt-main`）時，會以新的 `call_id` 重跑 pre-call，gateway 放行的這一筆收不到任何結算或失敗事件：300 秒內佔一個同時進行數、60 秒內計入 rpm，對帳在 1 小時後標為 `released_missing`，成本為 0。只在 key 的總量被打滿時發生，第一階段不修正
@@ -743,7 +743,7 @@ LLM guardrail：
 | M2 | 治理服務：policy、agent 版本、maker-checker 審批、hash chain 稽核 | 完成 |
 | M3 | kyt_agent v1.5 經 gateway 執行列入監控名單與送出 STR，等待核准時以狀態查詢 API 確認後重送 | 完成 |
 | M4 | LLM guardrail（注入防護與 spotlighting、PII 假名化）、`gpt-6-luna` fallback、tpm 限流 | 完成 |
-| M5 | 依委託使用者的 LLM 額度：LLM 請求驗證使用者 token、日月預算與流量上限、單次上限、逐筆的超額紀錄與對帳；key 預算改為每月重置 | 完成；kyt_agent 需 v1.6 才能經 gateway 呼叫 LLM（見 spec §4.5、§12） |
+| M5 | 依委託使用者的 LLM 額度：LLM 請求驗證使用者 token、日月預算、請求數與 token 上限、單次上限、逐筆的超額紀錄與對帳；key 預算改為每月重置 | 完成；kyt_agent 需 v1.6 才能經 gateway 呼叫 LLM（見 spec §4.5、§12） |
 
 ## 文件
 
