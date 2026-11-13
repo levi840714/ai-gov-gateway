@@ -1,14 +1,16 @@
 import json
+import time
 
 import httpx
 import pytest
 
-from probe_llm.server import FAIL_MODELS, RECORDED, app
+from probe_llm.server import FAIL_MODELS, RECORDED, RECORDED_HEADERS, app
 
 
 @pytest.fixture(autouse=True)
 def clear_recorded():
     RECORDED.clear()
+    RECORDED_HEADERS.clear()
 
 
 def _client() -> httpx.AsyncClient:
@@ -93,3 +95,52 @@ async def test_delete_clears_recorded_requests():
         await client.post("/v1/chat/completions", json=_body())
         await client.delete("/requests")
         assert (await client.get("/requests")).json() == []
+
+
+JWT = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJhIn0.c2ln"
+
+
+@pytest.mark.parametrize(
+    ("headers", "kind"),
+    [
+        ({"Authorization": "Bearer probe"}, "other"),
+        ({"Authorization": f"Bearer {JWT}"}, "jwt"),
+        ({}, "absent"),
+    ],
+)
+async def test_request_headers_records_names_and_authorization_kind(headers, kind):
+    async with _client() as client:
+        await client.post(
+            "/v1/chat/completions", json=_body(), headers={**headers, "X-Probe-Test": "secret"}
+        )
+        recorded = (await client.get("/request-headers")).json()
+    assert recorded[-1]["authorization"] == kind
+    assert "x-probe-test" in recorded[-1]["names"]
+    assert "secret" not in json.dumps(recorded)
+
+
+async def test_jwt_in_any_header_is_flagged():
+    async with _client() as client:
+        await client.post("/v1/chat/completions", json=_body(), headers={"X-Forwarded-Auth": JWT})
+        recorded = (await client.get("/request-headers")).json()
+    assert recorded[-1]["jwt_headers"] == ["x-forwarded-auth"]
+
+
+async def test_delete_also_clears_recorded_headers():
+    async with _client() as client:
+        await client.post("/v1/chat/completions", json=_body())
+        await client.delete("/requests")
+        assert (await client.get("/request-headers")).json() == []
+
+
+async def test_chunk_delay_spaces_out_stream_chunks():
+    async with _client() as client:
+        started = time.monotonic()
+        response = await client.post(
+            "/v1/chat/completions",
+            json=_body("probe:reply=echo", "probe:chunk_delay=0.05", user="abcdef", stream=True),
+        )
+        elapsed = time.monotonic() - started
+    chunks = [line for line in response.text.splitlines() if line.startswith("data: ")]
+    # role、兩段內容、結尾與 [DONE]：每個 chunk 之前都等待
+    assert elapsed >= 0.05 * (len(chunks) - 1)

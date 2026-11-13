@@ -1,11 +1,14 @@
 """OpenAI 相容的測試 provider：記錄收到的請求，依 system 訊息中的 probe: 指令回應。
 
 指令一行一個：probe:reply=echo|<文字>、probe:tool=<名稱>、probe:fail=<模型>、
-probe:usage=<prompt token 數>、probe:split=<streaming 切分位置>。
+probe:usage=<prompt token 數>、probe:split=<streaming 切分位置>、
+probe:chunk_delay=<每個 streaming chunk 前等待的秒數>。
 """
 
+import asyncio
 import json
 import os
+import re
 import time
 import uuid
 from collections import deque
@@ -18,6 +21,9 @@ from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
 
 RECORDED: deque[dict[str, Any]] = deque(maxlen=100)
+# 只記 header 名稱與是否像 JWT，不記值：用來確認 gateway 沒有把使用者 token 轉送給 provider
+RECORDED_HEADERS: deque[dict[str, Any]] = deque(maxlen=100)
+_JWT = re.compile(r"eyJ[\w-]+\.[\w-]+\.[\w-]+")
 # 這些模型一律回 503：真實 agent 的 prompt 不含 probe: 指令，強制 fallback 時用環境變數設定
 FAIL_MODELS = {m for m in os.environ.get("PROBE_FAIL_MODELS", "").split(",") if m}
 
@@ -119,9 +125,18 @@ def stream_chunks(result: dict[str, Any], split: int) -> list[dict[str, Any]]:
     return [*chunks, final]
 
 
+def header_summary(headers: Any) -> dict[str, Any]:
+    names = sorted({name.lower() for name in headers.keys()})
+    auth = headers.get("authorization")
+    kind = "absent" if auth is None else "jwt" if _JWT.search(auth) else "other"
+    jwt_headers = sorted(name for name in names if _JWT.search(headers.get(name, "")))
+    return {"names": names, "authorization": kind, "jwt_headers": jwt_headers}
+
+
 async def chat(request: Request) -> Response:
     body = await request.json()
     RECORDED.append(body)
+    RECORDED_HEADERS.append(header_summary(request.headers))
     found = directives(body)
     if body.get("model") in FAIL_MODELS or found.get("fail") == body.get("model"):
         error = {"error": {"message": "probe unavailable", "type": "server_error"}}
@@ -130,10 +145,13 @@ async def chat(request: Request) -> Response:
     if not body.get("stream"):
         return JSONResponse(result)
     split = int(found.get("split", "1"))
+    delay = float(found.get("chunk_delay", "0"))
 
     async def events() -> AsyncIterator[str]:
         for item in stream_chunks(result, split):
+            await asyncio.sleep(delay)
             yield f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
+        await asyncio.sleep(delay)
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(events(), media_type="text/event-stream")
@@ -142,8 +160,13 @@ async def chat(request: Request) -> Response:
 async def recorded(request: Request) -> Response:
     if request.method == "DELETE":
         RECORDED.clear()
+        RECORDED_HEADERS.clear()
         return Response(status_code=204)
     return JSONResponse(list(RECORDED))
+
+
+async def recorded_headers(request: Request) -> Response:
+    return JSONResponse(list(RECORDED_HEADERS))
 
 
 async def health(request: Request) -> Response:
@@ -154,6 +177,7 @@ app = Starlette(
     routes=[
         Route("/v1/chat/completions", chat, methods=["POST"]),
         Route("/requests", recorded, methods=["GET", "DELETE"]),
+        Route("/request-headers", recorded_headers),
         Route("/health", health),
     ]
 )
