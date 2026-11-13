@@ -162,8 +162,9 @@ class LlmGuardrailHook(CustomGuardrail):
             raise _reject(503, "guardrail_unavailable") from None
         _ADMITTED.add(request.owner, request.call_id)
         if admitted.pseudonyms:
-            # admit 已確認 owner 與 call_id 都有效，否則不會放行
-            assert request.owner is not None and request.call_id is not None
+            # admit 已確認兩者都有效；仍明確檢查，python -O 會移除 assert
+            if request.owner is None or request.call_id is None:
+                raise _reject(503, "guardrail_unavailable")
             try:
                 _PENDING.remember(request.owner, request.call_id, admitted.pseudonyms)
             except DuplicateCallId:
