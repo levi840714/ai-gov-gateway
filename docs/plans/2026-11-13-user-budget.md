@@ -27,7 +27,7 @@
 - Keycloak 測試帳號：`alice`（analyst）、`bob`（compliance_supervisor）、`carol`（兩者）
 - `litellm.model_cost` 有 `gemini/gemini-3.8-flash` 與 `gpt-6-luna`（不含 `openai/` 前綴）的單價；probe 模型沒有單價（L10）
 
-**待 Task 1 驗證的假設**（任一不成立時停下來回報，由 controller 依 spike 文件的「不成立時」調整後續 task，不要自行改設計）
+**Task 1 驗證的假設**（2026-11-13 已完成，結果與對後續 task 的影響見 `docs/spikes/m5-findings.md`；B1–B3、B5、B9、B10 成立，B4、B6 的差異已寫進下方各 task）
 
 | 編號 | 假設 | 用在 |
 | ---- | ---- | ---- |
@@ -59,7 +59,8 @@ B8（字元數不低於 token 數）只影響 spec §8.6 的上界說明，在 T
 
 | 檔案 | 職責 |
 | ---- | ---- |
-| `scripts/spikes/m5_budget_probe.py`、`scripts/spikes/m5_spike.py`、`litellm/config.spike.yaml`、`docker-compose.spike.yml` | Task 1 的驗證程式（沿用 M4 的疊加方式） |
+| `scripts/spikes/m5_budget_probe.py`、`scripts/spikes/m5_spike.py`、`litellm/config.spike-m5.yaml`、`docker-compose.spike-m5.yml` | Task 1 的驗證程式（另建檔案，保留 M4 的重現環境） |
+| `probe_llm/server.py`、`tests/test_probe_llm.py` | Task 1 新增：`GET /request-headers`（header 名稱與是否含 JWT）、`probe:chunk_delay` |
 | `docs/spikes/m5-findings.md` | B1–B6、B8–B10 的結論 |
 | `src/ai_gov_gateway/engine/models.py` | 事件類型 `llm_access`、`llm_limit_exceeded` |
 | `src/ai_gov_gateway/engine/guardrails/models.py` | `GuardrailError` 的 `limit` 欄位；`GuardrailConfig.limits` |
@@ -89,8 +90,8 @@ B8（字元數不低於 token 數）只影響 spec §8.6 的上界說明，在 T
 ### Task 1：執行期驗證（B1–B6、B9、B10）
 
 **Files:**
-- Create: `scripts/spikes/m5_budget_probe.py`、`scripts/spikes/m5_spike.py`、`docs/spikes/m5-findings.md`
-- Modify: `litellm/config.spike.yaml`、`docker-compose.spike.yml`
+- Create: `scripts/spikes/m5_budget_probe.py`、`scripts/spikes/m5_spike.py`、`litellm/config.spike-m5.yaml`、`docker-compose.spike-m5.yml`、`docs/spikes/m5-findings.md`
+- Modify: `probe_llm/server.py`、`tests/test_probe_llm.py`（B2 需要 header 紀錄、B6 需要慢速 streaming）
 
 - [ ] **Step 1: 只記錄的 guardrail**
 
@@ -990,7 +991,7 @@ def test_settlement_missing_fields_returns_none(broken):
     assert settlement_from_log(broken, at=NOW) is None
 ```
 
-欄位名稱以 Task 1 的 B3 結論為準；B3 顯示 key 雜湊的來源與 `owner_of()` 不同時，兩者改用同一個來源。成本以 `Decimal(str(value))` 轉換，避免 float 的二進位誤差。
+依 B3：call_id 取 `kwargs["litellm_call_id"]`（`standard_logging_object["id"]` 不是 call_id）；`metadata.user_api_key_hash` 與 `user_api_key_dict.token` 同值，`owner` 與 `owner_of()` 一致。成本是有二進位誤差的 float（`0.00012200000000000001`），以 `Decimal(str(round(value, 12)))` 轉換，才會等於 `SpendLogs.spend`；測試加一例 `response_cost=0.00012200000000000001` → `Decimal("0.000122")`。
 
 - [ ] **Step 2: 實作 hook_adapter 與 plugin**
 
@@ -1053,7 +1054,8 @@ async def async_log_success_event(self, kwargs, response_obj, start_time, end_ti
 | ---- | ---- |
 | `test_success_log_settles_with_reconcile_tag` | SpendLogs 有 `success` → 以其 `spend`、token 結算，`settled_by == "reconcile"`，超額照常計算並寫稽核 |
 | `test_failure_only_releases` | 只有失敗紀錄 → `released` |
-| `test_missing_log_kept_and_counted` | 沒有紀錄 → 保持 `in_flight`，回報的未解決數加一 |
+| `test_missing_log_kept_before_threshold` | 沒有紀錄、放行未超過 `release_missing_after` → 保持 `in_flight`，`unresolved` 加一 |
+| `test_missing_log_released_after_threshold` | 沒有紀錄、放行超過 `release_missing_after` → `released`，`released_missing` 加一（B5：rate limit fallback 的第二個 call_id 不會有 SpendLogs） |
 | `test_owner_matches_hashed_api_key` | SpendLogs 的 `api_key` 經 `sha256_hex` 後才與 `owner` 比對 |
 | `test_output_has_no_user_identifiers` | 輸出只含數量與 `call_id` |
 
@@ -1061,13 +1063,19 @@ async def async_log_success_event(self, kwargs, response_obj, start_time, end_ti
 
 ```python
 async def reconcile(
-    ledger: UsageLedger, spend_logs: SpendLogReader, gate: LlmGate, *, older_than: datetime, batch: int = 500
+    ledger: UsageLedger,
+    spend_logs: SpendLogReader,
+    gate: LlmGate,
+    *,
+    older_than: datetime,
+    release_missing_before: datetime,
+    batch: int = 500,
 ) -> ReconcileReport:
     """把逾時的 in_flight 依 LiteLLM_SpendLogs 結算或釋放；結算走與 callback 相同的超額計算。"""
 ```
 
-- `SpendLogReader` 以 psycopg 讀 litellm 資料庫：`SELECT status, spend, prompt_tokens, completion_tokens FROM "LiteLLM_SpendLogs" WHERE litellm_call_id = %s AND api_key = %s`（`api_key` 欄位是 key 的雜湊；比對前把 `owner` 反查不可行，所以改為以 `call_id` 查出後在程式中比對 `sha256_hex(api_key) == owner`）
-- `__main__`：`python -m ai_gov_gateway.reconcile --older-than 10m`，從 `GOV_DATABASE_URL` 與 `DATABASE_URL` 連線（gateway 容器內都有），輸出 `settled=N released=N unresolved=N`
+- `SpendLogReader` 以 psycopg 讀 litellm 資料庫：`SELECT status, spend, prompt_tokens, completion_tokens, api_key FROM "LiteLLM_SpendLogs" WHERE litellm_call_id = %s`，在程式中比對 `sha256_hex(api_key) == owner`（B3：`api_key` 欄位就是 key 的雜湊，與 `user_api_key_dict.token` 同值；`owner` 是它的 sha256，不能反查）
+- `__main__`：`python -m ai_gov_gateway.reconcile --older-than 10m --release-missing-after 1h`，從 `GOV_DATABASE_URL` 與 `DATABASE_URL` 連線（gateway 容器內都有），輸出 `settled=N released=N released_missing=N unresolved=N`
 - 不 import LiteLLM
 
 - [ ] **Step 3: 通過並 commit**：`git commit -m "feat: reconcile in-flight LLM usage from LiteLLM spend logs"`
@@ -1088,7 +1096,7 @@ KYT_LLM = {
     "rpm_limit": 60,
     "tpm_limit": 300000,
     "max_budget": 30.0,
-    "budget_duration": "1mo",  # B9 不成立時改為 "30d"
+    "budget_duration": "1mo",  # B9：每月 1 日 00:00 UTC 重置
 }
 ```
 

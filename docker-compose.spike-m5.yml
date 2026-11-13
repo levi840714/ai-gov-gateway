@@ -1,0 +1,10 @@
+# 只在 M5 驗證時疊加：docker compose -f docker-compose.yml -f docker-compose.spike-m5.yml up -d gateway
+# M4 的 docker-compose.spike.yml 保留給 M4 的重現，兩者不要同時使用
+services:
+  gateway:
+    environment:
+      PYTHONPATH: /opt/ai-gov-gateway:/opt/spike
+    volumes:
+      - ./litellm/config.spike-m5.yaml:/app/config.yaml:ro
+      - ./scripts/spikes:/opt/spike/scripts/spikes:ro
+      - ./scripts/__init__.py:/opt/spike/scripts/__init__.py:ro

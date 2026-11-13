@@ -3,7 +3,7 @@
 - 日期：2026-11-13
 - 狀態：設計中，尚未實作；實作計畫見 [docs/plans/2026-11-13-user-budget.md](../plans/2026-11-13-user-budget.md)
 - 前一階段：[M4 LLM guardrail 設計](2026-10-23-m4-guardrails-design.md)
-- 驗證紀錄：[LiteLLM v1.105.1 的靜態檢查與待驗證項目](../spikes/m5-user-budget-spike.md)
+- 驗證紀錄：[LiteLLM v1.105.1 的靜態檢查與待驗證項目](../spikes/m5-user-budget-spike.md)、[執行期驗證結果](../spikes/m5-findings.md)
 - 修訂：初稿採「呼叫前預留」；討論後改為第一階段先做「事後累計 + 精確記錄超額」，預留的設計移到 §16，作為第二階段的紀錄
 
 ## 1. 背景
@@ -60,7 +60,7 @@
 | 額度來源 | OPA 依 agent 與使用者角色提供（`governance.llm` 擴充） | 與 guardrail 設定同一個來源、同樣以 GitOps 審查；policy 只回傳數值，計數由引擎做 |
 | 拒絕的狀態碼 | 預算用完 403（不可重試）、rpm / tpm / 同時進行數 429（可重試）、token 問題 401 | kyt 會自動重試 429；預算要到隔天才恢復，回 429 只會浪費重試 |
 
-**尚未驗證、需要 spike 確認的假設**（詳見 §11 與 spike 文件）：hook 拿得到原始 `Authorization`（B1、B2）、結算事件的時機、`call_id` 與成本（B3–B6）、key 的 `"1mo"` 週期（B9）、改寫 `max_tokens` 會送到 provider（B10）。B7、B8 只有第二階段的預留需要。
+**執行期驗證**（§11、[m5-findings.md](../spikes/m5-findings.md)）：B1–B6、B9、B10 已於 2026-11-13 驗證，設計不需要改變方向，細節的調整已寫回 §6.3、§8.3、§8.5。B8 待實作時以真實請求量測，B7 只有第二階段需要。
 
 ### 元件
 
@@ -207,7 +207,7 @@ B 可以在呼叫前預留最壞成本（§16），也可以事後累計。用 g
 
 ### 6.3 key 的總額度
 
-目前 `max_budget: 5.0` 沒有週期，用完就永久停擺。改為 `budget_duration: "1mo"`，`max_budget` 依「預期使用者數 × 個人月額度」設定，示範環境用 30.0。`"1mo"` 由 LiteLLM 的 reset job 處理，從 key 建立或上次重置起算，不是日曆月（B9 確認）。
+目前 `max_budget: 5.0` 沒有週期，用完就永久停擺。改為 `budget_duration: "1mo"`，`max_budget` 依「預期使用者數 × 個人月額度」設定，示範環境用 30.0。`"1mo"` 由 LiteLLM 的 reset job 處理，在每月 1 日 00:00 UTC（台北 08:00）重置（B9）；個人月額度則在台北時間的 1 日 00:00 重置，兩者差 8 小時。
 
 ## 7. 依使用者的流量與單次上限
 
@@ -289,7 +289,8 @@ SELECT pg_advisory_xact_lock(72410002, hashtext(agent_id || ':' || user_sub));
 - `async_post_call_success_hook` 不用於結算：streaming 時不會呼叫（M4 findings A4），也拿不到成本
 - **router fallback**：同一個 `call_id`（A6），成功的那次結算實際成本，帳本記的 `model` 是請求的別名、成本是實際模型的
 - **rate limit 觸發的 fallback**：proxy 以新的 `call_id` 重跑 pre-call，第二筆收不到任何事件（M4 findings，待 B5 確認），由對帳標為 `released`
-- **streaming**：結算在串流結束後的 success 事件（B3）；中途斷線時的行為待 B6 確認，沒有事件時由對帳處理
+- **streaming**：結算在串流結束後的 success 事件（B3）。client 中途斷線時仍有 success 事件，成本只含斷線前產生的部分（B6）；真實 provider 斷線後可能已產生並計費更多輸出，帳本會少記，列為已知限制
+- 成本是有二進位誤差的 float（B3），先四捨五入到小數第 12 位再轉 `Decimal`，與 `LiteLLM_SpendLogs.spend` 一致；call_id 取 `kwargs["litellm_call_id"]`，`standard_logging_object["id"]` 不是 call_id
 
 ### 8.4 超額的計算
 
@@ -320,7 +321,7 @@ docker compose exec gateway python -m ai_gov_gateway.reconcile --older-than 10m
 - 找出 `in_flight` 且放行超過指定時間的紀錄，以 `(sha256(api_key), litellm_call_id)` 對照 `LiteLLM_SpendLogs`
 - 有 `status = success` 的紀錄：以它的 `spend`、`prompt_tokens`、`completion_tokens` 結算，走 §8.4 同一套計算，`settled_by = reconcile`
 - 只有失敗紀錄：標為 `released`
-- 都沒有：保留 `in_flight`，在輸出中列出數量（只列 `call_id`，不列使用者），由人工判斷
+- 都沒有：放行未超過 `--release-missing-after`（預設 1 小時）時保留 `in_flight`，等 LiteLLM 的批次寫入；超過後標為 `released`，在輸出中分開計數（`released_missing`）。rate limit fallback 的第二個 `call_id` 在 SpendLogs 沒有任何紀錄（B5），不這樣處理會累積永遠無法解決的紀錄
 - 對帳是補救，不是主要路徑；輸出的筆數可以當作 callback 遺失的監控指標
 
 ### 8.6 超額的上界
@@ -426,7 +427,7 @@ kyt 的設定（`max_concurrent` 4、`max_input_chars` 100,000、`max_output_tok
 
 ## 11. 尚未驗證的假設
 
-靜態檢查（spike L1–L10）已確認方案 A 的限制與 B 需要的入口存在；以下需要執行期驗證。
+靜態檢查（spike L1–L10）已確認方案 A 的限制與 B 需要的入口存在。執行期驗證的結果見 [m5-findings.md](../spikes/m5-findings.md)：B1–B3、B5、B9、B10 成立；B4 只觸發一次 `log_failure`，不影響設計；B6 有 success 事件但只含斷線前的用量。B8 待 Task 13。
 
 | 編號 | 假設 | 影響 | 不成立時 |
 | ---- | ---- | ---- | -------- |
