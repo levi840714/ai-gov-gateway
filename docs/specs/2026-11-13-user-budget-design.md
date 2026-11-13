@@ -1,7 +1,7 @@
 # M5 依委託使用者限制 LLM 用量設計
 
 - 日期：2026-11-13
-- 狀態：設計中，尚未實作；實作計畫見 [docs/plans/2026-11-13-user-budget.md](../plans/2026-11-13-user-budget.md)
+- 狀態：第一階段已實作；實作時的調整見 §17。實作計畫見 [docs/plans/2026-11-13-user-budget.md](../plans/2026-11-13-user-budget.md)
 - 前一階段：[M4 LLM guardrail 設計](2026-10-23-m4-guardrails-design.md)
 - 驗證紀錄：[LiteLLM v1.105.1 的靜態檢查與待驗證項目](../spikes/m5-user-budget-spike.md)、[執行期驗證結果](../spikes/m5-findings.md)
 - 修訂：初稿採「呼叫前預留」；討論後改為第一階段先做「事後累計 + 精確記錄超額」，預留的設計移到 §16，作為第二階段的紀錄
@@ -60,7 +60,7 @@
 | 額度來源 | OPA 依 agent 與使用者角色提供（`governance.llm` 擴充） | 與 guardrail 設定同一個來源、同樣以 GitOps 審查；policy 只回傳數值，計數由引擎做 |
 | 拒絕的狀態碼 | 預算用完 403（不可重試）、rpm / tpm / 同時進行數 429（可重試）、token 問題 401 | kyt 會自動重試 429；預算要到隔天才恢復，回 429 只會浪費重試 |
 
-**執行期驗證**（§11、[m5-findings.md](../spikes/m5-findings.md)）：B1–B6、B9、B10 已於 2026-11-13 驗證，設計不需要改變方向，細節的調整已寫回 §6.3、§8.3、§8.5。B8 待實作時以真實請求量測，B7 只有第二階段需要。
+**執行期驗證**（§11、[m5-findings.md](../spikes/m5-findings.md)）：B1–B6、B9、B10 已於 2026-11-13 驗證，設計不需要改變方向，細節的調整已寫回 §6.3、§8.3、§8.5。B8 與 B7 於 2026-11-14 以真實 Gemini 量測，B8 的結果已寫回 §8.6。
 
 ### 元件
 
@@ -289,7 +289,7 @@ SELECT pg_advisory_xact_lock(72410002, hashtext(agent_id || ':' || user_sub));
 - 不用 `async_log_failure_event` 釋放：router 重試與 fallback 前的每次失敗可能都會觸發（B4），那時請求還在進行
 - `async_post_call_success_hook` 不用於結算：streaming 時不會呼叫（M4 findings A4），也拿不到成本
 - **router fallback**：同一個 `call_id`（A6），成功的那次結算實際成本，帳本記的 `model` 是請求的別名、成本是實際模型的
-- **rate limit 觸發的 fallback**：proxy 以新的 `call_id` 重跑 pre-call，第二筆收不到任何事件（M4 findings，待 B5 確認），由對帳標為 `released`
+- **rate limit 觸發的 fallback**：proxy 以新的 `call_id` 重跑 pre-call，第二筆收不到任何事件（B5 已確認），由對帳標為 `released`；key 的限流造成的這種紀錄見 §17.2
 - **streaming**：結算在串流結束後的 success 事件（B3）。client 中途斷線時仍有 success 事件，成本只含斷線前產生的部分（B6）；真實 provider 斷線後可能已產生並計費更多輸出，帳本會少記，列為已知限制
 - 成本是有二進位誤差的 float（B3），先四捨五入到小數第 12 位再轉 `Decimal`，與 `LiteLLM_SpendLogs.spend` 一致；call_id 取 `kwargs["litellm_call_id"]`，`standard_logging_object["id"]` 不是 call_id
 
@@ -297,16 +297,16 @@ SELECT pg_advisory_xact_lock(72410002, hashtext(agent_id || ':' || user_sub));
 
 結算在一個交易中完成，與放行用同一把（agent, 使用者）的鎖：
 
-1. 讀出這一筆所屬的日、月期別中**其他已結算**請求的成本總和 `before`
+1. 讀出這一筆所屬的日、月期別中**其他已結算**請求的成本總和 `before`；期別以這一筆的放行時間決定，上下界都要比對（23:59 放行、午夜後才結算的請求仍算前一天）
 2. `after = before + cost`
 3. 這一筆的超額 `over = max(0, after − max(before, limit))`，日、月各算一次，`limit` 取這一筆放行時的快照
-4. tpm 同理：視窗為結算時間往前 60 秒，`before` 為視窗內其他已結算請求的 token，`limit` 為快照的 `tpm`
+4. tpm 同理：視窗為結算時間往前 60 秒，`before` 為視窗內其他已結算請求的 token，`limit` 為快照的 `tpm`。結算時間在等鎖之前取得，取得鎖後若早於這位使用者最新的 `settled_at`，就調成那個時間：並行結算時後拿到鎖的那筆可能帶著較早的時間，視窗會漏掉剛結算的那筆，兩筆互相看不到，tpm 的超額就少算
 5. 更新這一筆的 `status`、成本、token 與三個超額欄位
 6. 任一個超額大於 0 時，**在同一個交易中**寫入 `llm_limit_exceeded` 稽核（§10.2）
 
 性質：
 
-- **加總正確**：結算以（agent, 使用者）序列化，同一期內各筆的 `over` 依結算順序相加，正好等於 `max(0, 期別總成本 − limit)`，不會重複計算，也不會漏算。例如日額度 $2.00，已結算 $1.99，兩筆並行的請求分別花 $0.01 與 $0.012：先結算的那筆 `over = 0`（剛好到 $2.00），後結算的 `over = 0.012`，總超額 $0.012
+- **加總正確**：結算以（agent, 使用者）序列化、結算時間不早於前一筆，同一期內各筆的 `over` 依結算順序相加，正好等於 `max(0, 期別總成本 − limit)`，不會重複計算，也不會漏算。例如日額度 $2.00，已結算 $1.99，兩筆並行的請求分別花 $0.01 與 $0.012：先結算的那筆 `over = 0`（剛好到 $2.00），後結算的 `over = 0.012`，總超額 $0.012
 - **跨過上限的那一筆可以找出來**：`over > 0` 且 `before < limit` 的就是跨過上限的請求；`before ≥ limit` 的是跨過之後才結算的並行請求
 - **稽核與帳本一致**：同一個交易，兩者同時成功或同時失敗。鎖的順序固定為「使用者鎖 → 稽核鎖」，放行與拒絕的稽核不會在持有使用者鎖時取稽核鎖，因此不會死鎖
 - 等級在同一期中改變時，各筆以自己的快照計算，加總不再等於「總成本減某一個上限」，但每一筆的超額仍有明確定義
@@ -334,7 +334,9 @@ docker compose exec gateway python -m ai_gov_gateway.reconcile --older-than 10m
 單筆最大成本 = max_input_chars × 最高輸入單價 + max_output_tokens × 最高輸出單價
 ```
 
-kyt 的設定（`max_concurrent` 4、`max_input_chars` 100,000、`max_output_tokens` 4,096、Gemini 單價）：單筆最大約 $0.075 + $0.015 = $0.09，超額上界約 $0.36，是日額度 $2 的 18%。這個上界假設字元數不低於 token 數（B8）。正常的 kyt 使用一次一筆，只會超出最後一筆，實測最多 $0.014。
+kyt 的設定（`max_concurrent` 4、`max_input_chars` 100,000、`max_output_tokens` 4,096、Gemini 單價 $0.75 / $3.75 每百萬 token）：B8 實測 kyt 的內容 token 數最多是字元數的 1.02 倍，輸入最多約 102,000 token。單筆最大約 $0.0765 + $0.0154 ≈ $0.092，超額上界約 $0.37，是日額度 $2 的 18%。正常的 kyt 使用一次一筆，只會超出最後一筆，實測最多 $0.014。
+
+1.02 只代表 kyt 的內容（hex 地址、交易對手清單、中文說明）；英文為主的內容通常是 3–4 字元／token，上界更寬鬆。新的 agent 若內容的 token 比字元多，要重新量測後調整 `max_input_chars`。
 
 逾時未結算的請求不再佔同時進行數（§7），它的成本如果之後才結算，會讓實際超額大於上界；這類情況只有結算延遲超過 300 秒才會發生，由對帳補記。
 
@@ -429,7 +431,7 @@ kyt 的設定（`max_concurrent` 4、`max_input_chars` 100,000、`max_output_tok
 
 ## 11. 尚未驗證的假設
 
-靜態檢查（spike L1–L10）已確認方案 A 的限制與 B 需要的入口存在。執行期驗證的結果見 [m5-findings.md](../spikes/m5-findings.md)：B1–B3、B5、B9、B10 成立；B4 只觸發一次 `log_failure`，不影響設計；B6 有 success 事件但只含斷線前的用量。B8 待 Task 13。
+靜態檢查（spike L1–L10）已確認方案 A 的限制與 B 需要的入口存在。執行期驗證的結果見 [m5-findings.md](../spikes/m5-findings.md)：B1–B3、B5、B9、B10 成立；B4 只觸發一次 `log_failure`，不影響設計；B6 有 success 事件但只含斷線前的用量。B8 不成立但差距小（kyt 的內容約 1 token／字元，最多 1.02），§8.6 的上界已乘上 1.02；B7 成立（Gemini 的 `max_tokens` 涵蓋 reasoning token）。
 
 | 編號 | 假設 | 影響 | 不成立時 |
 | ---- | ---- | ---- | -------- |
@@ -521,3 +523,40 @@ estimate_usd    = input_estimate × 最高輸入單價 + max_output_tokens × �
 - 第一階段的 `llm_limit_exceeded` 稽核顯示超額經常發生、或金額接近 §8.6 的上界
 - 新的 agent 單筆成本高（例如長上下文），事後累計的超額上界超過可接受的範圍
 - 合規或財務要求「不得超過」的硬上限
+
+## 17. 實作後修訂
+
+第一階段依 [實作計畫](../plans/2026-11-13-user-budget.md) 完成（Task 1–14）。與正文不同、或正文沒寫到的地方如下；正文已同步修改的項目在「原因」註明。
+
+### 17.1 設計與行為
+
+| 項目 | 原本 | 實作 | 原因 |
+| ---- | ---- | ---- | ---- |
+| spike 的環境 | 修改 M4 的 `litellm/config.spike.yaml` | 另建 `litellm/config.spike-m5.yaml`、`docker-compose.spike-m5.yml`；`probe_llm` 新增 `GET /request-headers`（只記 header 名稱與是否為 JWT）與 `probe:chunk_delay` | 保留 M4 的重現環境；B2、B6 的契約測試也要用到這兩個 probe 功能 |
+| key 的 `"1mo"`（B9） | 從建立時間起算 | 每月 1 日 00:00 UTC（台北 08:00）重置，與個人月額度差 8 小時 | B9 實測的 `budget_reset_at`；§6.3 已改 |
+| 對帳：查不到 SpendLogs | 保留 `in_flight` | 放行超過 `--release-missing-after`（預設 1h）仍查不到時標為 `released`，輸出中分開計數為 `released_missing` | rate limit fallback 的第二個 `call_id` 永遠沒有 SpendLogs（B5）；§8.5 已改 |
+| 對帳：被拒絕的請求 | 未確認被拒絕的請求是否寫入 SpendLogs | 被拒絕的請求（含 gateway hook 拒絕的）在 `LiteLLM_SpendLogs` 記為 `failure`、`spend` 為 0；對帳只以 `success` 結算，只有失敗紀錄的一律釋放，不會誤記成本 | 契約測試 `test_end_user_overrides_rejected` 的實際紀錄 |
+| 結算的 `call_id` | 未指定來源 | 取 `kwargs["litellm_call_id"]`；`standard_logging_object["id"]` 不是 call_id | B3；§8.3 已改 |
+| 結算的成本 | `Decimal(response_cost)` | `round(value, 12)` 後再轉 `Decimal`；對帳的 `spend` 也一樣處理 | `response_cost` 有二進位誤差（B3），四捨五入後與 `SpendLogs.spend` 相同；§8.3 已改 |
+| 結算時間 | 結算事件的時間 | 取得使用者鎖後，若早於這位使用者最新的 `settled_at` 就調成那個時間（`_in_lock_order`） | 並行結算時後拿到鎖的那筆可能帶著較早的時間，兩筆的 tpm 視窗互相看不到，超額少算（`fd12710`）；§8.4 已改 |
+| 結算的期別 | 期別的起點 | 以放行時間求出期別的 `[start, end)`，`before` 同時比對上下界（`period_bounds`） | 23:59 放行、午夜後才結算的請求，若只比對起點會把隔天已結算的成本也算進 `before` |
+| 帳本欄位 | 沒有 `key_alias` | `llm_usage` 多一欄 `key_alias`，`llm_limit_exceeded` 稽核的 `key_alias` 取自帳本 | 結算事件拿不到 key 名稱，稽核要能對照是哪個版本（`0f2ecb0`） |
+| `n` | 沒有限制 | 必須沒帶或剛好是 1，否則 400 `unsupported_field`（`field: "n"`），並寫 `llm_access` | 審查時發現 `n` 個回應會讓單筆成本變成 n 倍，§8.6 的上界不成立（`70a556e`）；§7、§10.1 已改 |
+| `llm_access` 的 `details.limit` | `type` 與恢復時間 | 同時進行數、rpm、tpm 與單次上限的拒絕另含設定的上限 `max`，並列判斷時的用量（`in_flight`、`requests`、`tokens`、`chars`）；預算的拒絕另記 `settled_usd` 與 `limit_usd`。回給 client 的 `limit` 不含 `max` | 稽核要看得出是哪個上限擋下；§10.2 已改 |
+| `llm_limit_exceeded` 的 `details.crossed` | 一個布林值 | 依項目記錄，例如 `{"budget_day": true, "tpm": false}`，只列超額大於 0 的項目 | 同一筆可能跨過日額度、但 tpm 早已超過，單一布林說不清楚 |
+| failure hook 的釋放 | 收到 failure 就釋放 | `AdmittedCalls` 記下這個 worker 放行過的 `(owner, call_id)`，只釋放其中的請求；沿用進行中 `call_id` 的請求被拒絕時記一次，先抵銷它觸發的 failure | client 可用 `x-litellm-call-id` 沿用進行中的 `call_id`，被拒絕的那個請求也會觸發 failure hook，原本會把原請求的帳本標為 `released`、並丟掉它的 PII 對照表。後者是 M4 就有的問題，一起修正（`534a0e8`） |
+| `LlmGuardrail` | 一個 `guard_request(key_alias, …)` | 拆成 `resolve(key_alias, user, model, call_id)`（agent 與 OPA 設定）與 `guard_request(agent, config, …)`；`llm_guardrail` 稽核的 `key_alias` 取自 `agent.key_alias` | `LlmGate` 要在 OPA 之後、guardrail 之前檢查額度與單次上限 |
+| 未註冊與停用的稽核 | M4 不寫稽核 | `resolve()` 拒絕時寫 `llm_access`（`unregistered_agent_version`、`agent_suspended`） | 補上 M4 的已知限制（§10.2） |
+| `LlmGate` 的介面 | 結算與釋放沒有回傳值 | `settle()`、`release()` 回傳是否寫入帳本，對帳以此計數；`Services.llm_gate` 取代 `llm_guardrail`；單價來源由 plugin 以 `runtime.use_pricing()` 交給 runtime | `engine/` 與 `runtime` 不 import LiteLLM；對帳要分得出「已結算」與「沒有可結算的紀錄」 |
+| B8 與超額上界 | 假設字元數不低於 token 數，上界約 $0.36 | kyt 的內容約 1 token／字元（0.98–1.00 字元／token，token 最多為字元的 1.02 倍），單筆最大約 $0.092，上界約 $0.37 | 真實 Gemini 實測（findings「真實 LLM 驗證」）；§8.6 已改 |
+| B7（第二階段） | 未驗證 | Gemini 的 `max_tokens` 涵蓋 reasoning token：`max_tokens=256` 時 `completion_tokens` 252，其中 reasoning 245 | 順帶量測；§16 的預留不需要另加 reasoning 上限 |
+| 測試用等級 | §9 只有 `supervisor` 與 `default` | `kyt-agent` 的第一個等級是 `quota_probe`（角色 `llm_quota_probe`，日額度 $0.002、輸出上限 64），Keycloak 新增只有這個角色的測試帳號 `erin` | 契約測試與 `demo_m5` 要在幾筆 probe 請求內跨過預算，不影響 alice、bob、carol 的額度 |
+
+### 17.2 實作時發現的已知限制
+
+| 限制 | 影響 | 處理 |
+| ---- | ---- | ---- |
+| LiteLLM 以 **key** 的 rpm / tpm 擋下有 fallback 的模型時，以新的 `call_id` 重跑 pre-call | gateway 放行了第二個 `call_id`，但它收不到任何結算或失敗事件：在 `GOV_USAGE_INFLIGHT_TTL_SECONDS`（300 秒）內佔一個 `max_concurrent`，60 秒內計入 rpm；對帳在 1 小時後標為 `released`（`released_missing`），成本為 0 | 第一階段只記錄，不修正。只在 key 的總量被打滿時發生，影響是暫時少一個同時進行數；修正需要分辨 LiteLLM 的重跑，依賴更多內部行為。契約測試的限流探測改用沒有 fallback 的 `probe-fallback`，避免留下這種紀錄 |
+| 有單價的模型別名在每個 process 第一次使用時建立後快取 | 以 LiteLLM 的 API 新增模型或 fallback 後，新的別名在重啟前一律 503 `budget_unavailable` | 新增模型後重啟 gateway；fail-closed，不會放行沒有單價的模型 |
+| 沿用進行中 `call_id` 的請求被拒絕，但它的 failure hook 沒有觸發 | 抵銷的次數留在 `AdmittedCalls`，原請求之後真的失敗時不會被釋放，要等 300 秒的 TTL 或對帳 | fail-closed，只影響自己（重複使用 `call_id` 的同一把 key）的同時進行數 |
+| streaming 中途斷線（B6） | 帳本只記到斷線前的用量；真實 provider 斷線後可能已產生並計費更多輸出 | 列入 README 已知限制 |
