@@ -7,6 +7,7 @@ from typing import Any
 import httpx
 
 from scripts.env import KEYS_FILE, LITELLM_URL
+from scripts.kc import user_token
 from scripts.make_keys import KEYS
 
 PROBE_URL = "http://127.0.0.1:8300"
@@ -20,36 +21,69 @@ def chat(
     *,
     model: str = "probe-primary",
     stream: bool = False,
+    user: str | None = "alice",
+    token: str | None = None,
+    body: dict[str, Any] | None = None,
+    headers: dict[str, str] | None = None,
 ) -> httpx.Response:
+    """以 x-litellm-api-key 帶 agent 的 key、Authorization 帶委託使用者的 token（M5）。
+
+    token 未指定時每次重取：access token 只有 300 秒。user 為 None 時不帶 Authorization。
+    """
     key = json.loads(KEYS_FILE.read_text())[key_alias]
+    sent = {"x-litellm-api-key": f"Bearer {key}", **(headers or {})}
+    if token is None and user is not None:
+        token = user_token(user)
+    if token is not None:
+        sent["Authorization"] = f"Bearer {token}"
     return httpx.post(
         f"{LITELLM_URL}/v1/chat/completions",
-        headers={"Authorization": f"Bearer {key}"},
-        json={"model": model, "messages": messages, "stream": stream},
+        headers=sent,
+        json={"model": model, "messages": messages, "stream": stream, **(body or {})},
         timeout=60,
     )
 
 
-def wait_until_allowed(key_alias: str, timeout: float = 90) -> None:
-    """LiteLLM 的 rpm、tpm 以 60 秒的固定視窗計算；被限流時等到視窗過去、再次放行。"""
+# 等待與超過 key 限流用的請求：模型沒有 fallback，LiteLLM 限流時只會跑一次 pre-call 並釋放。
+# probe-primary 會觸發限流 fallback，第二個 call_id 收不到事件（M5 spike B5），留在帳本佔同時進行數
+LIMIT_MODEL = "probe-fallback"
+# 等待用 bob、超過 tpm 用 carol：不消耗 alice 的個人 rpm，tpm 也不會鎖住 demo 與測試的主要使用者
+WAIT_USER = "bob"
+TPM_USER = "carol"
+
+
+def key_limited(response: httpx.Response) -> bool:
+    """LiteLLM 的 key 限流；gateway 的個人限流（user_rate_limited）不算。"""
+    return response.status_code == 429 and "user_rate_limited" not in response.text
+
+
+def wait_until_allowed(key_alias: str, timeout: float = 90, user: str = WAIT_USER) -> None:
+    """LiteLLM 的 rpm、tpm 以 60 秒的固定視窗計算；被限流時等到視窗過去、再次放行。
+
+    每次探測都會在帳本留下一筆並計入該使用者的 rpm，所以間隔 10 秒。
+    """
     ping = [{"role": "system", "content": "probe:reply=ok"}, {"role": "user", "content": "ping"}]
     deadline = time.monotonic() + timeout
-    while chat(key_alias, ping).status_code == 429:
+    while chat(key_alias, ping, model=LIMIT_MODEL, user=user).status_code == 429:
         if time.monotonic() > deadline:
             raise RuntimeError(f"{key_alias} is still rate limited after {timeout}s")
-        time.sleep(5)
+        time.sleep(10)
 
 
-def exceed_tpm(key_alias: str = AGENT_KEY, attempts: int = 3) -> list[int]:
-    """每次回報的用量都超過 key 的 tpm；前後都等限流解除，不影響之後的請求。"""
+def exceed_tpm(key_alias: str = AGENT_KEY, attempts: int = 3) -> list[httpx.Response]:
+    """每次回報的用量都超過 key 的 tpm；前後都等限流解除，不影響之後的請求。
+
+    第一筆的使用者也會超過個人 tpm（M5），之後改由另一位使用者送出，429 才來自 key 的限流。
+    """
     usage = KEYS[key_alias]["tpm_limit"] + 1
     messages = [
         {"role": "system", "content": f"probe:usage={usage}"},
         {"role": "user", "content": "x"},
     ]
+    users = [TPM_USER] + [WAIT_USER] * (attempts - 1)
     wait_until_allowed(key_alias)
     try:
-        return [chat(key_alias, messages).status_code for _ in range(attempts)]
+        return [chat(key_alias, messages, model=LIMIT_MODEL, user=user) for user in users]
     finally:
         wait_until_allowed(key_alias)
 

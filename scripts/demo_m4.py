@@ -20,6 +20,7 @@ from scripts.llm_sim import (
     chat,
     clear_probe,
     exceed_tpm,
+    key_limited,
     probe_requests,
     stream_text,
     tool_turn,
@@ -206,8 +207,13 @@ def main() -> int:
     )
 
     # 用量在回應後才累計，緊接的請求可能仍放行，見 tests/integration 的 test_tpm_limit_returns_429
-    statuses = exceed_tpm()
-    check("10 超過 tpm 回 429", statuses[0] == 200 and 429 in statuses[1:], statuses)
+    responses = exceed_tpm()
+    statuses = [r.status_code for r in responses]
+    check(
+        "10 超過 key 的 tpm 回 429",
+        statuses[0] == 200 and any(key_limited(r) for r in responses[1:]),
+        statuses,
+    )
 
     try:
         compose("stop", "opa")

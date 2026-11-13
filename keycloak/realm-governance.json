@@ -9,6 +9,10 @@
       },
       {
         "name": "compliance_supervisor"
+      },
+      {
+        "name": "llm_quota_probe",
+        "description": "只供整合測試與 demo：極低的 LLM 額度等級（policies/agents/data.json 的 quota_probe）"
       }
     ]
   },
@@ -66,6 +70,24 @@
       "realmRoles": [
         "analyst",
         "compliance_supervisor"
+      ]
+    },
+    {
+      "username": "erin",
+      "enabled": true,
+      "email": "erin@example.test",
+      "emailVerified": true,
+      "firstName": "Erin",
+      "lastName": "QuotaProbe",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "erin-test-pw",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "llm_quota_probe"
       ]
     }
   ],

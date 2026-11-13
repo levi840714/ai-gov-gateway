@@ -26,12 +26,14 @@ KYT_V15_TOOLS = {
     "mcp_tool_permissions": {"account_ops": ["add_to_watchlist", "file_str"]},
 }
 
-# 一個 kyt 案件約 13 萬 token，分散在數分鐘內；probe 模型給整合測試與 demo 使用，不花 LLM 費用
+# 一個 kyt 案件約 13 萬 token，分散在數分鐘內；probe 模型給整合測試與 demo 使用，不花 LLM 費用。
+# agent 的總額度依「使用者數 × 個人月額度」設定；個人額度由 gateway 依 OPA 的等級強制
 KYT_LLM = {
     "models": ["kyt-main", "probe-primary", "probe-fallback"],
     "rpm_limit": 60,
-    "max_budget": 5.0,
     "tpm_limit": 300000,
+    "max_budget": 30.0,
+    "budget_duration": "1mo",  # M5 spike B9：每月 1 日 00:00 UTC 重置
 }
 
 KEYS = {

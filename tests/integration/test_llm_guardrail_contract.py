@@ -8,12 +8,14 @@ import pytest
 
 from ai_gov_gateway.engine.guardrails.injection import REDACTED, spotlight
 from scripts.env import KEYS_FILE, LITELLM_URL, env
+from scripts.kc import user_token
 from scripts.llm_sim import (
     AGENT_KEY,
     PROBE_URL,
     chat,
     clear_probe,
     exceed_tpm,
+    key_limited,
     probe_requests,
     stream_text,
     tool_turn,
@@ -97,9 +99,13 @@ def _key(alias: str) -> str:
 
 
 def _embeddings(key: str) -> httpx.Response:
+    # 帶上有效的使用者 token：確認被拒絕是因為路由或 call_type，不是缺 token
     return httpx.post(
         f"{LITELLM_URL}/v1/embeddings",
-        headers={"Authorization": f"Bearer {key}"},
+        headers={
+            "x-litellm-api-key": f"Bearer {key}",
+            "Authorization": f"Bearer {user_token('alice')}",
+        },
         json={"model": "probe-primary", "input": TW_ID},
         timeout=30,
     )
@@ -128,12 +134,7 @@ def test_non_chat_calls_are_rejected_by_the_hook():
 
 def test_unmasked_fields_are_rejected_before_provider():
     messages = [{"role": "system", "content": "probe:reply=ok"}, {"role": "user", "content": "hi"}]
-    response = httpx.post(
-        f"{LITELLM_URL}/v1/chat/completions",
-        headers={"Authorization": f"Bearer {_key(AGENT_KEY)}"},
-        json={"model": "probe-primary", "messages": messages, "prompt": f"id {TW_ID}"},
-        timeout=30,
-    )
+    response = chat(AGENT_KEY, messages, body={"prompt": f"id {TW_ID}"})
     assert response.status_code == 400
     assert "unsupported_field" in response.text
     assert TW_ID not in response.text
@@ -151,11 +152,12 @@ def test_message_names_are_pseudonymized():
 
 
 def test_tpm_limit_returns_429():
-    statuses = exceed_tpm()
-    # A8：tpm 在回應後才累計，第一次放行、之後超過上限。累計在 success callback 完成，
-    # 緊接的下一個請求可能還沒算到，所以只要求之後至少一次 429，且 429 的請求沒有送到 provider
+    responses = exceed_tpm()
+    statuses = [r.status_code for r in responses]
+    # A8：tpm 在回應後才累計，第一次放行、之後超過上限。緊接的請求可能還沒算到，
+    # 所以只要求之後至少一次 key 的 429（不是個人限流），且 429 的請求沒有送到 provider
     sent = [r for r in probe_requests() if r["messages"][-1]["content"] == "x"]
-    assert statuses[0] == 200 and 429 in statuses[1:], statuses
+    assert statuses[0] == 200 and any(key_limited(r) for r in responses[1:]), statuses
     assert len(sent) == statuses.count(200)
 
 
